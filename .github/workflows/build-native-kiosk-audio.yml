@@ -139,31 +139,25 @@ jobs:
       # =====================================================================
 
       - name: Create unsigned IPA
+        shell: bash
         run: |
           set -euo pipefail
 
-          APP_PATH="${{ steps.app.outputs.app_path }}"
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          IPA_DIR="$PWD/build/ipa"
+          PAYLOAD_DIR="$IPA_DIR/Payload"
+          IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
 
-          rm -rf "$PWD/build/Payload"
-          mkdir -p "$PWD/build/Payload"
+          rm -rf "$IPA_DIR"
+          mkdir -p "$PAYLOAD_DIR"
 
-          ditto \
-            "$APP_PATH" \
-            "$PWD/build/Payload/Home Assistant.app"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
 
-          (
-            cd "$PWD/build"
+          cd "$IPA_DIR"
+          zip -qry "$IPA_PATH" Payload
 
-            /usr/bin/zip \
-              -qry \
-              HomeAssistant-NativeKioskAudio-unsigned.ipa \
-              Payload
-          )
-
-          echo ""
           echo "Created IPA:"
-          ls -lh \
-            "$PWD/build/HomeAssistant-NativeKioskAudio-unsigned.ipa"
+          ls -lh "$IPA_PATH"
 
       # =====================================================================
       # IPA bereitstellen
