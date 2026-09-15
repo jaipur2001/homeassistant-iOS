@@ -19,8 +19,16 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      # =====================================================================
+      # Repository
+      # =====================================================================
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # =====================================================================
+      # Umgebung anzeigen
+      # =====================================================================
 
       - name: Environment
         run: |
@@ -37,6 +45,19 @@ jobs:
           echo "Commit:"
           git rev-parse HEAD
 
+          echo ""
+          echo "Branch:"
+          git branch --show-current
+
+      # =====================================================================
+      # Swift Package Manager
+      #
+      # KEIN -sdk iphoneos!
+      #
+      # Xcode muss selbst entscheiden, welche Abhängigkeiten für iOS bzw.
+      # watchOS mit welchem SDK gebaut werden.
+      # =====================================================================
+
       - name: Resolve Swift packages
         run: |
           set -euo pipefail
@@ -45,6 +66,21 @@ jobs:
             -project HomeAssistant.xcodeproj \
             -scheme App-Debug \
             -resolvePackageDependencies
+
+      # =====================================================================
+      # Unsigned iOS Device Build
+      #
+      # Wichtig:
+      #
+      #   -destination generic/platform=iOS
+      #
+      # aber bewusst KEIN:
+      #
+      #   -sdk iphoneos
+      #
+      # Sonst werden auch die watchOS-Abhängigkeiten auf iphoneos gezwungen
+      # und Shared-iOS / Shared-watchOS kollidieren miteinander.
+      # =====================================================================
 
       - name: Build unsigned device app
         run: |
@@ -56,7 +92,6 @@ jobs:
             -project HomeAssistant.xcodeproj \
             -scheme App-Debug \
             -configuration Debug \
-            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$PWD/build/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
@@ -66,22 +101,48 @@ jobs:
             build \
             | tee "$PWD/build/xcodebuild.log"
 
-      - name: Create unsigned IPA
+      # =====================================================================
+      # Build-Produkt suchen
+      # =====================================================================
+
+      - name: Locate application bundle
+        id: app
         run: |
           set -euo pipefail
 
           PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
+
+          echo "Build products:"
+          find "$PWD/build/DerivedData/Build/Products" \
+            -maxdepth 3 \
+            -type d \
+            -name '*.app' \
+            -print || true
+
           APP_PATH="$PRODUCT_DIR/Home Assistant.app"
 
           if [ ! -d "$APP_PATH" ]; then
-            echo "Home Assistant.app not found."
-            echo ""
-            echo "Available build products:"
-            find "$PWD/build/DerivedData/Build/Products" \
-              -maxdepth 3 \
-              -print
+            echo "::error::Home Assistant.app not found at expected path"
             exit 1
           fi
+
+          echo "Application bundle:"
+          echo "$APP_PATH"
+
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # Unsigned IPA erstellen
+      #
+      # Eine IPA ist letztlich ein ZIP mit Payload/<App>.app.
+      # Signiert wird anschließend separat.
+      # =====================================================================
+
+      - name: Create unsigned IPA
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ steps.app.outputs.app_path }}"
 
           rm -rf "$PWD/build/Payload"
           mkdir -p "$PWD/build/Payload"
@@ -100,9 +161,13 @@ jobs:
           )
 
           echo ""
-          echo "Created:"
+          echo "Created IPA:"
           ls -lh \
             "$PWD/build/HomeAssistant-NativeKioskAudio-unsigned.ipa"
+
+      # =====================================================================
+      # IPA bereitstellen
+      # =====================================================================
 
       - name: Upload IPA
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -110,6 +175,10 @@ jobs:
           name: HomeAssistant-NativeKioskAudio-unsigned
           path: build/HomeAssistant-NativeKioskAudio-unsigned.ipa
           if-no-files-found: error
+
+      # =====================================================================
+      # Buildlog immer bereitstellen
+      # =====================================================================
 
       - name: Upload Xcode build log
         if: always()
