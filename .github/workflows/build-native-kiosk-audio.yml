@@ -106,7 +106,8 @@ jobs:
       # =====================================================================
 
       - name: Locate application bundle
-        id: app
+        id: locate_app
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -119,10 +120,17 @@ jobs:
             -name '*.app' \
             -print || true
 
-          APP_PATH="$PRODUCT_DIR/Home Assistant.app"
+          APP_PATH="$(
+            find "$PRODUCT_DIR" \
+              -maxdepth 1 \
+              -type d \
+              -name 'Home Assistant*.app' \
+              -print \
+              -quit
+          )"
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "::error::Home Assistant.app not found at expected path"
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Home Assistant application bundle not found in $PRODUCT_DIR"
             exit 1
           fi
 
