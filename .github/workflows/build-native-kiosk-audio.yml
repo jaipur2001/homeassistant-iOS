@@ -1,0 +1,120 @@
+name: Build Native Kiosk Audio IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - native-kiosk-audio
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+
+jobs:
+  build:
+    name: Build unsigned iOS app
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Environment
+        run: |
+          set -euo pipefail
+
+          echo "Xcode:"
+          xcodebuild -version
+
+          echo ""
+          echo "Swift:"
+          swift --version
+
+          echo ""
+          echo "Commit:"
+          git rev-parse HEAD
+
+      - name: Resolve Swift packages
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -resolvePackageDependencies
+
+      - name: Build unsigned device app
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$PWD/build"
+
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build \
+            | tee "$PWD/build/xcodebuild.log"
+
+      - name: Create unsigned IPA
+        run: |
+          set -euo pipefail
+
+          PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
+          APP_PATH="$PRODUCT_DIR/Home Assistant.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Home Assistant.app not found."
+            echo ""
+            echo "Available build products:"
+            find "$PWD/build/DerivedData/Build/Products" \
+              -maxdepth 3 \
+              -print
+            exit 1
+          fi
+
+          rm -rf "$PWD/build/Payload"
+          mkdir -p "$PWD/build/Payload"
+
+          ditto \
+            "$APP_PATH" \
+            "$PWD/build/Payload/Home Assistant.app"
+
+          (
+            cd "$PWD/build"
+
+            /usr/bin/zip \
+              -qry \
+              HomeAssistant-NativeKioskAudio-unsigned.ipa \
+              Payload
+          )
+
+          echo ""
+          echo "Created:"
+          ls -lh \
+            "$PWD/build/HomeAssistant-NativeKioskAudio-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: HomeAssistant-NativeKioskAudio-unsigned
+          path: build/HomeAssistant-NativeKioskAudio-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: NativeKioskAudio-xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
