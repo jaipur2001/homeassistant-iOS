@@ -173,26 +173,32 @@ jobs:
           ls -lh "$APP_PATH/$ORIGINAL_EXECUTABLE"
 
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
-          echo "original_executable=$ORIGINAL_EXECUTABLE" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
       # Unsigned IPA erstellen
       #
-      # Home Assistant erzeugt derzeit:
+      # Home Assistant erzeugt aktuell:
       #
       #   Home Assistant Δ.app
       #   Home Assistant Δ
       #
-      # Sideloadly behandelt das Unicode-Zeichen Δ offenbar als URL-Encoding
-      # %CE%94 und findet deshalb das Executable nicht.
+      # Sideloadly verarbeitet den Unicode-Namen nicht korrekt.
       #
-      # Für die IPA normalisieren wir deshalb ausschließlich das äußere
-      # App-Bundle und dessen CFBundleExecutable:
+      # Deshalb:
       #
       #   Home Assistant Δ.app  -> HomeAssistant.app
       #   Home Assistant Δ      -> HomeAssistant
       #
-      # Anschließend wird CFBundleExecutable passend geändert.
+      # Zusätzlich wird die eingebettete Watch-App entfernt.
+      #
+      # Hintergrund:
+      #
+      # Sideloadly ändert beim Signieren die Bundle-ID der Haupt-App.
+      # Die Watch-App enthält jedoch noch den ursprünglichen
+      # WKCompanionAppBundleIdentifier.
+      #
+      # iOS/iPadOS lehnt diese Kombination mit
+      # InvalidCompanionAppBundleIdentifier ab.
       # =====================================================================
 
       - name: Create unsigned IPA
@@ -220,9 +226,9 @@ jobs:
           mkdir -p "$PAYLOAD_DIR"
 
           # ---------------------------------------------------------------
-          # Bundle mit macOS ditto kopieren.
-          # Dadurch bleiben Dateirechte, Symlinks und Extended Attributes
-          # zuverlässig erhalten.
+          # App-Bundle kopieren
+          #
+          # ditto erhält Dateirechte und Symlinks sauber.
           # ---------------------------------------------------------------
 
           ditto \
@@ -237,7 +243,7 @@ jobs:
           fi
 
           # ---------------------------------------------------------------
-          # Tatsächlichen Executable-Namen aus dem kopierten Bundle lesen
+          # Ursprüngliches Executable bestimmen
           # ---------------------------------------------------------------
 
           ORIGINAL_EXECUTABLE="$(
@@ -264,7 +270,7 @@ jobs:
           fi
 
           # ---------------------------------------------------------------
-          # Mach-O Executable auf ASCII-Namen normalisieren
+          # Executable auf ASCII-Namen normalisieren
           # ---------------------------------------------------------------
 
           echo ""
@@ -278,19 +284,64 @@ jobs:
             "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
 
           # ---------------------------------------------------------------
-          # Info.plist an neuen Executable-Namen anpassen
+          # Info.plist aktualisieren
           # ---------------------------------------------------------------
 
           /usr/libexec/PlistBuddy \
             -c "Set :CFBundleExecutable $NORMALIZED_EXECUTABLE" \
             "$INFO_PLIST"
 
-          # Zusätzlich internen Bundle-Namen auf ASCII normalisieren.
-          # CFBundleDisplayName bleibt unverändert, damit die App auf dem
-          # Gerät weiterhin ihren normalen sichtbaren Namen behalten kann.
           /usr/libexec/PlistBuddy \
             -c "Set :CFBundleName HomeAssistant" \
             "$INFO_PLIST" || true
+
+          # ---------------------------------------------------------------
+          # Eingebettete Apple-Watch-App entfernen
+          #
+          # Für die iPad-Kiosk-Anwendung wird die Watch-App nicht benötigt.
+          # Dadurch vermeiden wir den Fehler:
+          #
+          # InvalidCompanionAppBundleIdentifier
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Embedded content before cleanup:"
+
+          find "$NORMALIZED_APP" \
+            -maxdepth 4 \
+            -type d \
+            \( -name '*.app' -o -name 'Watch' \) \
+            -print || true
+
+          if [ -d "$NORMALIZED_APP/Watch" ]; then
+            echo ""
+            echo "Removing embedded Watch directory:"
+            echo "$NORMALIZED_APP/Watch"
+
+            rm -rf "$NORMALIZED_APP/Watch"
+          else
+            echo ""
+            echo "No embedded Watch directory found."
+          fi
+
+          # ---------------------------------------------------------------
+          # Prüfen, ob irgendwo innerhalb des Haupt-Bundles weiterhin eine
+          # Watch-App existiert.
+          # ---------------------------------------------------------------
+
+          REMAINING_WATCH_APP="$(
+            find "$NORMALIZED_APP" \
+              -type d \
+              -name '*Watch*.app' \
+              -print \
+              -quit || true
+          )"
+
+          if [ -n "$REMAINING_WATCH_APP" ]; then
+            echo "::error::Embedded Watch application still present:"
+            echo "$REMAINING_WATCH_APP"
+            exit 1
+          fi
 
           # ---------------------------------------------------------------
           # Normalisiertes Bundle überprüfen
@@ -312,12 +363,18 @@ jobs:
           fi
 
           if [ ! -f "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
-            echo "::error::Normalized executable does not exist"
+            echo "::error::Normalized executable does not exist:"
+            echo "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
             exit 1
           fi
 
           if [ ! -x "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
             echo "::error::Normalized executable is not executable"
+            exit 1
+          fi
+
+          if [ -d "$NORMALIZED_APP/Watch" ]; then
+            echo "::error::Watch directory still exists"
             exit 1
           fi
 
@@ -332,21 +389,38 @@ jobs:
           echo ""
           echo "Important Info.plist values:"
 
+          echo ""
+          echo "CFBundleIdentifier:"
           /usr/libexec/PlistBuddy \
             -c 'Print :CFBundleIdentifier' \
             "$INFO_PLIST" || true
 
+          echo ""
+          echo "CFBundleName:"
           /usr/libexec/PlistBuddy \
             -c 'Print :CFBundleName' \
             "$INFO_PLIST" || true
 
+          echo ""
+          echo "CFBundleDisplayName:"
           /usr/libexec/PlistBuddy \
             -c 'Print :CFBundleDisplayName' \
             "$INFO_PLIST" || true
 
+          echo ""
+          echo "CFBundleExecutable:"
           /usr/libexec/PlistBuddy \
             -c 'Print :CFBundleExecutable' \
             "$INFO_PLIST"
+
+          echo ""
+          echo "Embedded applications after cleanup:"
+
+          find "$NORMALIZED_APP" \
+            -mindepth 1 \
+            -type d \
+            -name '*.app' \
+            -print || true
 
           # ---------------------------------------------------------------
           # IPA erzeugen
@@ -371,10 +445,11 @@ jobs:
           ls -lh "$IPA_PATH"
 
       # =====================================================================
-      # Fertige IPA nochmals entpacken und verifizieren
+      # Fertige IPA vollständig kontrollieren
       #
-      # Damit erkennen wir bereits auf GitHub, ob genau die Struktur
-      # vorhanden ist, die Sideloadly später sehen wird.
+      # Wir entpacken die tatsächlich erzeugte IPA noch einmal.
+      # Dadurch prüfen wir genau die Struktur, die später auch Sideloadly
+      # verarbeitet.
       # =====================================================================
 
       - name: Verify unsigned IPA
@@ -385,12 +460,26 @@ jobs:
           IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
           VERIFY_DIR="$PWD/build/ipa-verify"
 
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA does not exist:"
+            echo "$IPA_PATH"
+            exit 1
+          fi
+
           rm -rf "$VERIFY_DIR"
           mkdir -p "$VERIFY_DIR"
+
+          # ---------------------------------------------------------------
+          # ZIP-Struktur prüfen
+          # ---------------------------------------------------------------
 
           echo "Testing ZIP integrity..."
 
           unzip -t "$IPA_PATH"
+
+          # ---------------------------------------------------------------
+          # IPA entpacken
+          # ---------------------------------------------------------------
 
           echo ""
           echo "Extracting IPA..."
@@ -401,6 +490,10 @@ jobs:
 
           APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
           INFO_PLIST="$APP_PATH/Info.plist"
+
+          # ---------------------------------------------------------------
+          # Haupt-App prüfen
+          # ---------------------------------------------------------------
 
           if [ ! -d "$APP_PATH" ]; then
             echo "::error::Payload/HomeAssistant.app not found"
@@ -423,7 +516,8 @@ jobs:
           echo "$EXECUTABLE"
 
           if [ "$EXECUTABLE" != "HomeAssistant" ]; then
-            echo "::error::Unexpected CFBundleExecutable: $EXECUTABLE"
+            echo "::error::Unexpected CFBundleExecutable:"
+            echo "$EXECUTABLE"
             exit 1
           fi
 
@@ -446,11 +540,55 @@ jobs:
           echo "Executable type:"
           file "$APP_PATH/$EXECUTABLE"
 
+          # ---------------------------------------------------------------
+          # Bundle Identifier anzeigen
+          # ---------------------------------------------------------------
+
           echo ""
           echo "Bundle identifier:"
+
           /usr/libexec/PlistBuddy \
             -c 'Print :CFBundleIdentifier' \
             "$INFO_PLIST"
+
+          # ---------------------------------------------------------------
+          # Sicherstellen, dass keine Watch-App mehr vorhanden ist
+          # ---------------------------------------------------------------
+
+          if [ -d "$APP_PATH/Watch" ]; then
+            echo "::error::Embedded Watch directory still present"
+            exit 1
+          fi
+
+          WATCH_APP="$(
+            find "$APP_PATH" \
+              -type d \
+              -name '*Watch*.app' \
+              -print \
+              -quit || true
+          )"
+
+          if [ -n "$WATCH_APP" ]; then
+            echo "::error::Embedded Watch application still present:"
+            echo "$WATCH_APP"
+            exit 1
+          fi
+
+          echo ""
+          echo "No embedded Watch app present."
+
+          # ---------------------------------------------------------------
+          # Verzeichnisstruktur anzeigen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Embedded application bundles:"
+
+          find "$APP_PATH" \
+            -mindepth 1 \
+            -type d \
+            -name '*.app' \
+            -print || true
 
           echo ""
           echo "IPA verification successful."
@@ -468,7 +606,7 @@ jobs:
           retention-days: 7
 
       # =====================================================================
-      # Buildlog immer bereitstellen
+      # Xcode-Buildlog immer bereitstellen
       # =====================================================================
 
       - name: Upload Xcode build log
