@@ -42,10 +42,17 @@ struct DeviceNameView: View {
         .disableOnboardingPrimaryAction(deviceName.count < 3 || request.isSaving)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            #if DEBUG
+            #if targetEnvironment(simulator)
             deviceName = "Simulator \(UUID().uuidString.prefix(4))"
             #else
-            deviceName = UIDevice.current.name
+            let reportedName = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let genericNames = ["iPad", "iPhone", UIDevice.current.model]
+
+            if reportedName.isEmpty || genericNames.contains(reportedName) {
+                deviceName = "Home Assistant Kiosk"
+            } else {
+                deviceName = reportedName
+            }
             #endif
         }
         .onDisappear {
