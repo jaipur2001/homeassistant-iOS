@@ -2,7 +2,19 @@ import Foundation
 import ObjectMapper
 
 class MobileAppRegistrationRequest: Mappable {
-    var AppData: [String: Any]?
+    private var appDataStorage: [String: Any]?
+
+    var AppData: [String: Any]? {
+        get {
+            var appData = appDataStorage ?? [:]
+            appData["push_websocket_channel"] = true
+            return appData
+        }
+        set {
+            appDataStorage = newValue
+        }
+    }
+
     var AppIdentifier: String?
     var AppName: String?
     var AppVersion: String?
