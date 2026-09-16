@@ -31,6 +31,7 @@ jobs:
       # =====================================================================
 
       - name: Environment
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -59,6 +60,7 @@ jobs:
       # =====================================================================
 
       - name: Resolve Swift packages
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -83,6 +85,7 @@ jobs:
       # =====================================================================
 
       - name: Build unsigned device app
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -134,16 +137,62 @@ jobs:
             exit 1
           fi
 
+          INFO_PLIST="$APP_PATH/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Info.plist not found: $INFO_PLIST"
+            exit 1
+          fi
+
+          ORIGINAL_EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          if [ -z "$ORIGINAL_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable is empty"
+            exit 1
+          fi
+
+          if [ ! -f "$APP_PATH/$ORIGINAL_EXECUTABLE" ]; then
+            echo "::error::Executable not found: $APP_PATH/$ORIGINAL_EXECUTABLE"
+            exit 1
+          fi
+
+          echo ""
           echo "Application bundle:"
           echo "$APP_PATH"
 
+          echo ""
+          echo "CFBundleExecutable:"
+          echo "$ORIGINAL_EXECUTABLE"
+
+          echo ""
+          echo "Executable:"
+          ls -lh "$APP_PATH/$ORIGINAL_EXECUTABLE"
+
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+          echo "original_executable=$ORIGINAL_EXECUTABLE" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
       # Unsigned IPA erstellen
       #
-      # Eine IPA ist letztlich ein ZIP mit Payload/<App>.app.
-      # Signiert wird anschließend separat.
+      # Home Assistant erzeugt derzeit:
+      #
+      #   Home Assistant Δ.app
+      #   Home Assistant Δ
+      #
+      # Sideloadly behandelt das Unicode-Zeichen Δ offenbar als URL-Encoding
+      # %CE%94 und findet deshalb das Executable nicht.
+      #
+      # Für die IPA normalisieren wir deshalb ausschließlich das äußere
+      # App-Bundle und dessen CFBundleExecutable:
+      #
+      #   Home Assistant Δ.app  -> HomeAssistant.app
+      #   Home Assistant Δ      -> HomeAssistant
+      #
+      # Anschließend wird CFBundleExecutable passend geändert.
       # =====================================================================
 
       - name: Create unsigned IPA
@@ -152,17 +201,159 @@ jobs:
           set -euo pipefail
 
           APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+
           IPA_DIR="$PWD/build/ipa"
           PAYLOAD_DIR="$IPA_DIR/Payload"
+
+          NORMALIZED_APP="$PAYLOAD_DIR/HomeAssistant.app"
+          NORMALIZED_EXECUTABLE="HomeAssistant"
+
           IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
 
-          echo "Application bundle:"
+          echo "Source application bundle:"
           echo "$APP_PATH"
+
+          echo ""
+          echo "Preparing IPA directory..."
 
           rm -rf "$IPA_DIR"
           mkdir -p "$PAYLOAD_DIR"
 
-          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+          # ---------------------------------------------------------------
+          # Bundle mit macOS ditto kopieren.
+          # Dadurch bleiben Dateirechte, Symlinks und Extended Attributes
+          # zuverlässig erhalten.
+          # ---------------------------------------------------------------
+
+          ditto \
+            "$APP_PATH" \
+            "$NORMALIZED_APP"
+
+          INFO_PLIST="$NORMALIZED_APP/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Copied Info.plist not found: $INFO_PLIST"
+            exit 1
+          fi
+
+          # ---------------------------------------------------------------
+          # Tatsächlichen Executable-Namen aus dem kopierten Bundle lesen
+          # ---------------------------------------------------------------
+
+          ORIGINAL_EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          echo ""
+          echo "Original CFBundleExecutable:"
+          echo "$ORIGINAL_EXECUTABLE"
+
+          if [ -z "$ORIGINAL_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable is empty"
+            exit 1
+          fi
+
+          ORIGINAL_EXECUTABLE_PATH="$NORMALIZED_APP/$ORIGINAL_EXECUTABLE"
+
+          if [ ! -f "$ORIGINAL_EXECUTABLE_PATH" ]; then
+            echo "::error::Original executable not found:"
+            echo "$ORIGINAL_EXECUTABLE_PATH"
+            exit 1
+          fi
+
+          # ---------------------------------------------------------------
+          # Mach-O Executable auf ASCII-Namen normalisieren
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Renaming executable:"
+          echo "  $ORIGINAL_EXECUTABLE"
+          echo "  ->"
+          echo "  $NORMALIZED_EXECUTABLE"
+
+          mv \
+            "$ORIGINAL_EXECUTABLE_PATH" \
+            "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          # ---------------------------------------------------------------
+          # Info.plist an neuen Executable-Namen anpassen
+          # ---------------------------------------------------------------
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleExecutable $NORMALIZED_EXECUTABLE" \
+            "$INFO_PLIST"
+
+          # Zusätzlich internen Bundle-Namen auf ASCII normalisieren.
+          # CFBundleDisplayName bleibt unverändert, damit die App auf dem
+          # Gerät weiterhin ihren normalen sichtbaren Namen behalten kann.
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleName HomeAssistant" \
+            "$INFO_PLIST" || true
+
+          # ---------------------------------------------------------------
+          # Normalisiertes Bundle überprüfen
+          # ---------------------------------------------------------------
+
+          FINAL_EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          echo ""
+          echo "Normalized CFBundleExecutable:"
+          echo "$FINAL_EXECUTABLE"
+
+          if [ "$FINAL_EXECUTABLE" != "$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable normalization failed"
+            exit 1
+          fi
+
+          if [ ! -f "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::Normalized executable does not exist"
+            exit 1
+          fi
+
+          if [ ! -x "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::Normalized executable is not executable"
+            exit 1
+          fi
+
+          echo ""
+          echo "Normalized executable:"
+          ls -lh "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          echo ""
+          echo "Executable type:"
+          file "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          echo ""
+          echo "Important Info.plist values:"
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' \
+            "$INFO_PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleName' \
+            "$INFO_PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleDisplayName' \
+            "$INFO_PLIST" || true
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleExecutable' \
+            "$INFO_PLIST"
+
+          # ---------------------------------------------------------------
+          # IPA erzeugen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Creating IPA..."
 
           cd "$IPA_DIR"
 
@@ -170,13 +361,103 @@ jobs:
             "HomeAssistant-Native-Kiosk-Audio-unsigned.ipa" \
             Payload
 
-          echo "Created IPA:"
-          ls -lh "$IPA_PATH"
-
           if [ ! -f "$IPA_PATH" ]; then
             echo "::error::IPA was not created"
             exit 1
           fi
+
+          echo ""
+          echo "Created IPA:"
+          ls -lh "$IPA_PATH"
+
+      # =====================================================================
+      # Fertige IPA nochmals entpacken und verifizieren
+      #
+      # Damit erkennen wir bereits auf GitHub, ob genau die Struktur
+      # vorhanden ist, die Sideloadly später sehen wird.
+      # =====================================================================
+
+      - name: Verify unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
+          VERIFY_DIR="$PWD/build/ipa-verify"
+
+          rm -rf "$VERIFY_DIR"
+          mkdir -p "$VERIFY_DIR"
+
+          echo "Testing ZIP integrity..."
+
+          unzip -t "$IPA_PATH"
+
+          echo ""
+          echo "Extracting IPA..."
+
+          unzip -q \
+            "$IPA_PATH" \
+            -d "$VERIFY_DIR"
+
+          APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
+          INFO_PLIST="$APP_PATH/Info.plist"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Payload/HomeAssistant.app not found"
+            exit 1
+          fi
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Info.plist not found in packaged IPA"
+            exit 1
+          fi
+
+          EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          echo ""
+          echo "Packaged CFBundleExecutable:"
+          echo "$EXECUTABLE"
+
+          if [ "$EXECUTABLE" != "HomeAssistant" ]; then
+            echo "::error::Unexpected CFBundleExecutable: $EXECUTABLE"
+            exit 1
+          fi
+
+          if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
+            echo "::error::Executable missing from packaged IPA:"
+            echo "$APP_PATH/$EXECUTABLE"
+            exit 1
+          fi
+
+          if [ ! -x "$APP_PATH/$EXECUTABLE" ]; then
+            echo "::error::Packaged executable is not executable"
+            exit 1
+          fi
+
+          echo ""
+          echo "Packaged executable:"
+          ls -lh "$APP_PATH/$EXECUTABLE"
+
+          echo ""
+          echo "Executable type:"
+          file "$APP_PATH/$EXECUTABLE"
+
+          echo ""
+          echo "Bundle identifier:"
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' \
+            "$INFO_PLIST"
+
+          echo ""
+          echo "IPA verification successful."
+
+      # =====================================================================
+      # IPA als GitHub Artifact bereitstellen
+      # =====================================================================
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -185,6 +466,7 @@ jobs:
           path: build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
+
       # =====================================================================
       # Buildlog immer bereitstellen
       # =====================================================================
