@@ -82,6 +82,24 @@ jobs:
       #
       # Sonst werden auch die watchOS-Abhängigkeiten auf iphoneos gezwungen
       # und Shared-iOS / Shared-watchOS kollidieren miteinander.
+      #
+      # ENABLE_DEBUG_DYLIB=NO:
+      #
+      # Xcode kann bei Debug-Builds ein kleines Stub-Executable erzeugen,
+      # welches den eigentlichen App-Code aus:
+      #
+      #   <AppName>.debug.dylib
+      #
+      # lädt.
+      #
+      # Bei unserer manuell erzeugten und anschließend mit Sideloadly
+      # signierten IPA führte dies auf dem iPad zu:
+      #
+      #   Termination Reason: DYLD
+      #   Library missing
+      #
+      # Deshalb wird dieses Debug-Dylib-Layout hier explizit deaktiviert.
+      # Das Haupt-Executable enthält damit wieder den eigentlichen App-Code.
       # =====================================================================
 
       - name: Build unsigned device app
@@ -97,6 +115,7 @@ jobs:
             -configuration Debug \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$PWD/build/DerivedData" \
+            ENABLE_DEBUG_DYLIB=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -171,6 +190,10 @@ jobs:
           echo ""
           echo "Executable:"
           ls -lh "$APP_PATH/$ORIGINAL_EXECUTABLE"
+
+          echo ""
+          echo "Mach-O dependencies of original executable:"
+          otool -L "$APP_PATH/$ORIGINAL_EXECUTABLE" || true
 
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
 
@@ -268,6 +291,36 @@ jobs:
             echo "$ORIGINAL_EXECUTABLE_PATH"
             exit 1
           fi
+
+          # ---------------------------------------------------------------
+          # Vor dem Umbenennen Mach-O-Abhängigkeiten anzeigen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Original executable Mach-O dependencies:"
+          otool -L "$ORIGINAL_EXECUTABLE_PATH"
+
+          # ---------------------------------------------------------------
+          # Sicherheitsprüfung:
+          #
+          # Nach ENABLE_DEBUG_DYLIB=NO darf das Haupt-Executable bereits
+          # hier keine *.debug.dylib mehr referenzieren.
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Checking original executable for debug dylib dependency..."
+
+          if otool -L "$ORIGINAL_EXECUTABLE_PATH" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Original executable still references a debug dylib:"
+            otool -L "$ORIGINAL_EXECUTABLE_PATH" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found in original executable."
 
           # ---------------------------------------------------------------
           # Executable auf ASCII-Namen normalisieren
@@ -385,6 +438,25 @@ jobs:
           echo ""
           echo "Executable type:"
           file "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          echo ""
+          echo "Normalized executable Mach-O dependencies:"
+          otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          echo ""
+          echo "Checking normalized executable for debug dylib dependency..."
+
+          if otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Normalized executable still references a debug dylib:"
+            otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found in normalized executable."
 
           echo ""
           echo "Important Info.plist values:"
@@ -541,6 +613,38 @@ jobs:
           file "$APP_PATH/$EXECUTABLE"
 
           # ---------------------------------------------------------------
+          # Mach-O-Abhängigkeiten prüfen
+          #
+          # Das Haupt-Executable darf bei unserer Sideload-IPA keine
+          # <AppName>.debug.dylib benötigen.
+          #
+          # Genau diese fehlende Abhängigkeit führte auf dem iPad zu:
+          #
+          #   Termination Reason: DYLD
+          #   Library missing
+          #
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Mach-O dependencies:"
+          otool -L "$APP_PATH/$EXECUTABLE"
+
+          echo ""
+          echo "Checking for debug dylib dependency..."
+
+          if otool -L "$APP_PATH/$EXECUTABLE" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Main executable still references a debug dylib:"
+            otool -L "$APP_PATH/$EXECUTABLE" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found."
+
+          # ---------------------------------------------------------------
           # Bundle Identifier anzeigen
           # ---------------------------------------------------------------
 
@@ -590,8 +694,22 @@ jobs:
             -name '*.app' \
             -print || true
 
+          # ---------------------------------------------------------------
+          # Abschluss
+          # ---------------------------------------------------------------
+
           echo ""
+          echo "============================================================"
           echo "IPA verification successful."
+          echo "============================================================"
+          echo ""
+          echo "CFBundleExecutable:"
+          echo "$EXECUTABLE"
+          echo ""
+          echo "No embedded Watch app present."
+          echo "No debug dylib dependency present."
+          echo ""
+          echo "IPA is ready for external signing."
 
       # =====================================================================
       # IPA als GitHub Artifact bereitstellen
