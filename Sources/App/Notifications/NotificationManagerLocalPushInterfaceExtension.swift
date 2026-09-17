@@ -18,7 +18,7 @@ final class NotificationManagerLocalPushInterfaceExtension: NotificationManagerL
             fatalError("Kiosk WebSocket push initialized before AppDelegate became available")
         }
 
-        directInterface = NotificationManagerLocalPushInterfaceDirect(delegate: notificationManager)
+        self.directInterface = NotificationManagerLocalPushInterfaceDirect(delegate: notificationManager)
     }
 
     func status(for server: Server) -> NotificationManagerLocalPushStatus {

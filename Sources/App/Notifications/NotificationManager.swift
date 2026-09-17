@@ -212,7 +212,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     return
                 }
 
-                let server = self.cameraServer(
+                let server = cameraServer(
                     from: userInfo,
                     fallback: webViewController.server
                 )
@@ -238,7 +238,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                         "Native kiosk media downloaded to \(localFileURL.path)"
                     )
 
-                    self.startKioskAudio(
+                    startKioskAudio(
                         fileURL: localFileURL
                     )
                 }
@@ -315,7 +315,6 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             kioskAudioPlayer = player
 
             guard player.play() else {
-
                 kioskAudioPlayer = nil
 
                 throw NSError(
@@ -334,7 +333,6 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     "duration=\(player.duration)s"
             )
         } catch {
-
             Current.Log.error(
                 "Unable to start native kiosk audio: \(error)"
             )
