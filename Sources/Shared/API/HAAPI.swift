@@ -397,6 +397,84 @@ public class HomeAssistantAPI {
         }
     }
 
+    /// Resolves a Home Assistant media-source URI into a temporary signed URL.
+    ///
+    /// Example:
+    ///
+    /// media-source://media_source/local/generated/alarm.mp3
+    ///
+    /// becomes a short-lived URL such as:
+    ///
+    /// /media/local/generated/alarm.mp3?authSig=...
+    public func resolveMediaSource(
+        _ mediaContentId: String,
+        expires: Int = 300
+    ) -> Promise<String> {
+        connectWebSocketIfNeeded()
+
+        let promise: Promise<HAData> = connection.send(
+            .init(
+                type: "media_source/resolve_media",
+                data: [
+                    "media_content_id": mediaContentId,
+                    "expires": expires,
+                ]
+            )
+        ).promise
+
+        return promise.map { data in
+            let resolvedURL: String = try data.decode("url")
+            return resolvedURL
+        }
+    }
+
+    /// Resolves and downloads a Home Assistant media-source item into a
+    /// temporary local file.
+    ///
+    /// The returned file URL can be handed directly to AVAudioPlayer.
+    public func downloadMediaSource(
+        _ mediaContentId: String,
+        expires: Int = 300
+    ) -> Promise<URL> {
+        resolveMediaSource(
+            mediaContentId,
+            expires: expires
+        )
+        .map { [server] resolvedURLString -> URL in
+
+            guard let parsedURL = URL(
+                string: resolvedURLString
+            ) else {
+                throw APIError.cantBuildURL
+            }
+
+            if parsedURL.scheme != nil {
+                return parsedURL
+            }
+
+            guard
+                let baseURL =
+                server.info.connection.evaluateActiveURL(),
+                let absoluteURL = URL(
+                    string: resolvedURLString,
+                    relativeTo: baseURL
+                )?.absoluteURL else {
+                throw APIError.cantBuildURL
+            }
+
+            return absoluteURL
+        }
+        .then { [self] mediaURL in
+
+            // media_source/resolve_media returns a signed URL.
+            // No Authorization header is required for the file request itself.
+            DownloadDataAt(
+                url: mediaURL,
+                needsAuth: false
+            )
+        }
+    }
+
     private func removeOldDownloadDirectory() {
         let fileManager = FileManager.default
 

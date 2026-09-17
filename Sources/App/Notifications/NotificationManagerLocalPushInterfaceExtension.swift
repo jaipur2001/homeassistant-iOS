@@ -1,426 +1,51 @@
-import Foundation
 import HAKit
-import NetworkExtension
-import PromiseKit
 import Shared
 
-final class NotificationManagerLocalPushInterfaceExtension: NSObject, NotificationManagerLocalPushInterface {
-    /// Delay in seconds before reloading managers after configuration changes.
-    /// This allows the system to persist changes before attempting to reload them.
-    private static let managerReloadDelay: TimeInterval = 0.5
-    private static let appOpenRetryDelays: [TimeInterval] = [10, 30, 60]
+/// Kiosk branch implementation:
+///
+/// The stock iOS app uses NEAppPushManager/PushProvider on physical iOS devices.
+/// Our sideloaded kiosk build cannot rely on those Apple push entitlements, so we
+/// deliberately route physical-device local push through the already existing
+/// direct Home Assistant WebSocket channel instead.
+///
+/// Keeping this type name avoids touching NotificationManager.swift and preserves
+/// the upstream call site while changing only the transport used by this branch.
+final class NotificationManagerLocalPushInterfaceExtension: NotificationManagerLocalPushInterface {
+    private let directInterface: NotificationManagerLocalPushInterfaceDirect
 
-    private var observers = [Observer]()
-    private var syncStates: PerServerContainer<LocalPushStateSync>!
-    private var managers = [Identifier<Server>: [NEAppPushManager]]()
-    private var appOpenRetryWorkItems = [DispatchWorkItem]()
-
-    private var tokens: [NSKeyValueObservation] = [] {
-        didSet {
-            for token in oldValue where !tokens.contains(where: { $0 === token }) {
-                token.invalidate()
-            }
+    init() {
+        guard let notificationManager = AppDelegate.shared?.notificationManager else {
+            fatalError("Kiosk WebSocket push initialized before AppDelegate became available")
         }
+
+        self.directInterface = NotificationManagerLocalPushInterfaceDirect(delegate: notificationManager)
     }
 
     func status(for server: Server) -> NotificationManagerLocalPushStatus {
-        if managers[server.identifier, default: []].contains(where: \.isActive) {
-            if let state = syncStates[server].value {
-                // manager is running and we have a value synced
-                return .allowed(state)
-            } else {
-                // manager claims to be running but push provider didn't set sync status
-                return .disabled
-            }
-        } else {
-            // manager isn't running
-            return .disabled
-        }
+        directInterface.status(for: server)
     }
 
     func addObserver(
         for server: Server,
         handler: @escaping (NotificationManagerLocalPushStatus) -> Void
     ) -> HACancellable {
-        let observer = Observer(server: server, handler: handler)
-        observers.append(observer)
-        return HABlockCancellable { [weak self] in
-            self?.observers.removeAll(where: { $0 == observer })
-        }
-    }
-
-    private struct Observer: Equatable {
-        var identifier = UUID()
-        var server: Server
-        var handler: (NotificationManagerLocalPushStatus) -> Void
-
-        static func == (lhs: Observer, rhs: Observer) -> Bool {
-            lhs.identifier == rhs.identifier
-        }
-    }
-
-    private func notifyObservers(for servers: [Server] = Current.servers.all) {
-        for observer in observers where servers.contains(observer.server) {
-            let status = status(for: observer.server)
-            observer.handler(status)
-        }
-    }
-
-    override init() {
-        super.init()
-        self.syncStates = PerServerContainer<LocalPushStateSync>(constructor: { [weak self] server in
-            let sync = LocalPushStateSync(settingsKey: PushProviderConfiguration.defaultSettingsKey(for: server))
-            let token = sync.observe { [weak self] _ in
-                self?.notifyObservers(for: [server])
-            }
-            return .init(sync, destructor: { _, _ in token.cancel() })
-        })
-        Current.servers.add(observer: self)
-
-        updateManagers()
+        directInterface.addObserver(for: server, handler: handler)
     }
 
     func retryLocalPush(for server: Server?, reason: LocalPushRetryReason) {
-        Task { [weak self] in
-            guard let self else { return }
-            let servers = await retryEligibleServers(targetServer: server)
-            guard !servers.isEmpty else {
-                Current.Log.info("Skipping local push retry for \(reason.eventValue), no eligible servers")
-                logRetryDiagnostics(reason: reason, targetServer: server, managers: [], error: nil)
-                return
-            }
-
-            Current.Log.info("Retrying local push for \(servers.count) server(s), reason: \(reason.eventValue)")
-            updateManagers(reason: reason, targetServer: server)
-        }
+        directInterface.retryLocalPush(for: server, reason: reason)
     }
 
     func scheduleAppOpenLocalPushRetries() {
-        cancelAppOpenRetryWorkItems()
-
-        retryLocalPush(for: nil, reason: .appOpen)
-
-        for delay in Self.appOpenRetryDelays {
-            let workItem = DispatchWorkItem { [weak self] in
-                self?.retryLocalPush(for: nil, reason: .appOpenDelayed(seconds: delay))
-            }
-            appOpenRetryWorkItems.append(workItem)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
-        }
-    }
-
-    private func cancelAppOpenRetryWorkItems() {
-        appOpenRetryWorkItems.forEach { $0.cancel() }
-        appOpenRetryWorkItems.removeAll()
-    }
-
-    private func updateManagers(
-        reason: LocalPushRetryReason? = nil,
-        targetServer: Server? = nil
-    ) {
-        Current.Log.info()
-
-        NEAppPushManager.loadAllFromPreferences { [weak self] managers, error in
-            guard let self else { return }
-
-            if let error {
-                Current.Log.error("failed to load local push managers: \(error)")
-                if let reason {
-                    logRetryDiagnostics(
-                        reason: reason,
-                        targetServer: targetServer,
-                        managers: managers ?? [],
-                        error: error
-                    )
-                }
-                return
-            }
-
-            let encoder = JSONEncoder()
-
-            var updatedManagers = [ConfigureManager]()
-            var usedManagers = Set<NEAppPushManager>()
-            var hasDirtyManagers = false
-
-            // update or create managers for the servers we have
-            for (ssid, servers) in serversBySSID() {
-                Current.Log.info("configuring push for \(ssid): \(servers)")
-
-                let existing = managers?.first(where: { $0.matchSSIDs == [ssid] })
-                if let existing {
-                    usedManagers.insert(existing)
-                }
-                let updated = updateManager(
-                    existingManager: existing,
-                    ssid: ssid,
-                    servers: servers,
-                    encoder: encoder,
-                    reason: reason
-                )
-                updatedManagers.append(updated)
-                if updated.isDirty {
-                    hasDirtyManagers = true
-                }
-            }
-
-            // remove any existing managers that didn't match
-            for manager in managers ?? [] where !usedManagers.contains(manager) {
-                manager.removeFromPreferences { error in
-                    Current.Log.info("remove unused manager \(manager) result: \(String(describing: error))")
-                }
-            }
-
-            configure(managers: updatedManagers)
-            if let reason, !hasDirtyManagers {
-                logRetryDiagnostics(reason: reason, targetServer: targetServer, managers: managers ?? [], error: nil)
-            }
-
-            // If we made changes to managers, reload them after a brief delay to ensure
-            // the system picks up the changes, especially when enabling local push
-            // while already on the internal network
-            if hasDirtyManagers {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.managerReloadDelay) { [weak self] in
-                    self?.reloadManagersAfterSave(reason: reason, targetServer: targetServer)
-                }
-            }
-        }
-    }
-
-    /// Reloads manager configurations from system preferences after they have been saved.
-    /// This ensures the NetworkExtension framework picks up configuration changes,
-    /// particularly when enabling local push while already on the internal network.
-    ///
-    /// Note: This only configures managers that were successfully saved by updateManagers().
-    /// Managers for removed SSIDs or disabled servers are intentionally not recreated.
-    private func reloadManagersAfterSave(
-        reason: LocalPushRetryReason? = nil,
-        targetServer: Server? = nil
-    ) {
-        Current.Log.info("Reloading managers after configuration changes")
-
-        NEAppPushManager.loadAllFromPreferences { [weak self] managers, error in
-            guard let self else { return }
-
-            if let error {
-                Current.Log.error("failed to reload local push managers: \(error)")
-                if let reason {
-                    logRetryDiagnostics(
-                        reason: reason,
-                        targetServer: targetServer,
-                        managers: managers ?? [],
-                        error: error
-                    )
-                }
-                return
-            }
-
-            var configureManagers = [ConfigureManager]()
-
-            // Only configure managers for currently enabled servers with configured SSIDs
-            for (ssid, servers) in serversBySSID() {
-                if let manager = managers?.first(where: { $0.matchSSIDs == [ssid] }) {
-                    configureManagers.append(
-                        ConfigureManager(ssid: ssid, manager: manager, servers: servers, isDirty: false)
-                    )
-                }
-            }
-
-            configure(managers: configureManagers)
-            if let reason {
-                logRetryDiagnostics(reason: reason, targetServer: targetServer, managers: managers ?? [], error: nil)
-            }
-        }
-    }
-
-    struct ConfigureManager {
-        var ssid: String
-        var manager: NEAppPushManager
-        var servers: [Server]
-
-        /// Indicates whether the manager's configuration has been modified and saved to preferences.
-        /// A "dirty" manager is one that had changes to its properties (isEnabled, matchSSIDs,
-        /// providerConfiguration, etc.) and was saved via `saveToPreferences()`.
-        /// This flag is used to trigger a reload of managers after saving, ensuring the
-        /// NetworkExtension framework picks up the configuration changes immediately.
-        var isDirty: Bool = false
-    }
-
-    private func configure(managers configureManagers: [ConfigureManager]) {
-        tokens.removeAll()
-
-        managers = configureManagers.reduce(into: [Identifier<Server>: [NEAppPushManager]]()) { result, value in
-            // notify on active state changes
-            tokens.append(value.manager.observe(\.isActive) { [weak self, servers = value.servers] manager, _ in
-                Current.Log.info("manager \(value.ssid) is active: \(manager.isActive)")
-                self?.notifyObservers(for: servers)
-            })
-
-            for server in value.servers {
-                result[server.identifier, default: []].append(value.manager)
-            }
-
-            value.manager.delegate = self
-        }
-
-        Current.Log.verbose("computed managers: \(managers)")
-
-        notifyObservers()
-    }
-
-    private func updateManager(
-        existingManager: NEAppPushManager?,
-        ssid: String,
-        servers: [Server],
-        encoder: JSONEncoder,
-        reason: LocalPushRetryReason?
-    ) -> ConfigureManager {
-        let manager = existingManager ?? NEAppPushManager()
-        // just toggling isEnabled doesn't seem to kill off the extension reliably, so we remove when unwanted
-
-        // Track whether any configuration properties are modified.
-        // "Dirty" means the manager's configuration differs from what's currently saved
-        // and requires a call to saveToPreferences() to persist the changes.
-        var isDirty = false
-
-        func updateAndDirty<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<NEAppPushManager, T>, _ value: T) {
-            if manager[keyPath: keyPath] != value {
-                Current.Log.info(keyPath)
-                manager[keyPath: keyPath] = value
-                isDirty = true
-            }
-        }
-
-        updateAndDirty(\.isEnabled, true)
-        updateAndDirty(\.localizedDescription, "HomeAssistant for \(ssid)")
-        updateAndDirty(\.providerBundleIdentifier, AppConstants.BundleID + ".PushProvider")
-        updateAndDirty(\.matchSSIDs, [ssid])
-
-        let configurations: [PushProviderConfiguration] = servers.map {
-            .init(serverIdentifier: $0.identifier, settingsKey: PushProviderConfiguration.defaultSettingsKey(for: $0))
-        }
-
-        do {
-            let existing = manager.providerConfiguration[PushProviderConfiguration.providerConfigurationKey] as? Data
-            let new = try encoder.encode(configurations)
-
-            if existing != new {
-                isDirty = true
-                manager.providerConfiguration = [
-                    PushProviderConfiguration.providerConfigurationKey: new,
-                ]
-            }
-        } catch {
-            Current.Log.error("failed to create config for push: \(error)")
-            manager.providerConfiguration = [:]
-        }
-
-        if isDirty {
-            manager.saveToPreferences { [weak self] error in
-                Current.Log.info("manager \(manager) saved, error: \(String(describing: error))")
-                if let reason, let error {
-                    for server in servers {
-                        self?.logRetryDiagnostics(
-                            reason: reason,
-                            targetServer: server,
-                            managers: [manager],
-                            error: error
-                        )
-                    }
-                }
-            }
-        }
-
-        return ConfigureManager(ssid: ssid, manager: manager, servers: servers, isDirty: isDirty)
-    }
-
-    private func serversBySSID() -> [String: [Server]] {
-        Current.servers.all.reduce(into: [String: [Server]]()) { result, server in
-            let connection = server.info.connection
-
-            guard connection.isLocalPushEnabled, connection.address(for: .internal) != nil else {
-                return
-            }
-
-            for ssid in server.info.connection.internalSSIDs ?? [] {
-                result[ssid, default: []].append(server)
-            }
-        }
-    }
-
-    private func retryEligibleServers(targetServer: Server?) async -> [Server] {
-        let currentSSID = await Current.connectivity.currentWiFiSSID()
-        return (targetServer.map { [$0] } ?? Current.servers.all).filter { server in
-            LocalPushRetryDiagnostics.canRetry(server: server, currentSSID: currentSSID)
-        }
-    }
-
-    private func logRetryDiagnostics(
-        reason: LocalPushRetryReason,
-        targetServer: Server?,
-        managers loadedManagers: [NEAppPushManager],
-        error: Error?
-    ) {
-        Task { [weak self] in
-            guard let self else { return }
-            await performLogRetryDiagnostics(
-                reason: reason,
-                targetServer: targetServer,
-                managers: loadedManagers,
-                error: error
-            )
-        }
-    }
-
-    private func performLogRetryDiagnostics(
-        reason: LocalPushRetryReason,
-        targetServer: Server?,
-        managers loadedManagers: [NEAppPushManager],
-        error: Error?
-    ) async {
-        let currentSSID = await Current.connectivity.currentWiFiSSID()
-        let servers = (targetServer.map { [$0] } ?? Current.servers.all).filter { server in
-            LocalPushRetryDiagnostics.matchesExpectedNetworkConditions(server: server, currentSSID: currentSSID)
-        }
-
-        for server in servers {
-            let serverManagers = managers[server.identifier, default: []]
-            let loadedServerManagers = loadedManagers.filter { manager in
-                (server.info.connection.internalSSIDs ?? []).contains { manager.matchSSIDs.contains($0) }
-            }
-            let managerCount = max(serverManagers.count, loadedServerManagers.count)
-            let activeManagerCount = max(
-                serverManagers.filter(\.isActive).count,
-                loadedServerManagers.filter(\.isActive).count
-            )
-
-            let isDisabledStatus: Bool
-            if case .disabled = status(for: server) {
-                isDisabledStatus = true
-            } else {
-                isDisabledStatus = false
-            }
-
-            guard error != nil || activeManagerCount == 0 || isDisabledStatus else {
-                continue
-            }
-
-            let payload = LocalPushRetryDiagnostics.payload(
-                server: server,
-                reason: reason,
-                currentSSID: currentSSID,
-                managerCount: managerCount,
-                activeManagerCount: activeManagerCount,
-                error: error
-            )
-            Current.clientEventStore.addEvent(ClientEvent(
-                text: "Local Push retry did not enable",
-                type: .settings,
-                payload: payload
-            ))
-        }
+        directInterface.scheduleAppOpenLocalPushRetries()
     }
 }
 
+/// Shared diagnostics helper used by ConnectionSettingsViewModel.
+///
+/// The stock physical-device implementation defines this helper in the same file.
+/// The kiosk transport no longer needs NEAppPushManager, but the connection settings
+/// still use the network eligibility checks, so the helper must remain available.
 enum LocalPushRetryDiagnostics {
     static func matchesExpectedNetworkConditions(server: Server, currentSSID: String?) -> Bool {
         guard server.info.connection.isLocalPushEnabled,
@@ -457,20 +82,5 @@ enum LocalPushRetryDiagnostics {
             "active_manager_count": activeManagerCount,
             "error": error.map { String(describing: $0) } ?? "",
         ]
-    }
-}
-
-extension NotificationManagerLocalPushInterfaceExtension: ServerObserver {
-    func serversDidChange(_ serverManager: ServerManager) {
-        updateManagers(reason: .serverChanged)
-    }
-}
-
-extension NotificationManagerLocalPushInterfaceExtension: NEAppPushDelegate {
-    func appPushManager(
-        _ manager: NEAppPushManager,
-        didReceiveIncomingCallWithUserInfo userInfo: [AnyHashable: Any] = [:]
-    ) {
-        // we do not have calls
     }
 }

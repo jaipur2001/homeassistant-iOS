@@ -1,3 +1,4 @@
+import AVFoundation
 import CallbackURLKit
 import FirebaseMessaging
 import Foundation
@@ -33,8 +34,24 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
     var commandManager = NotificationCommandManager()
 
-    /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.
-    private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
+    /// Persistent off-screen MPVolumeView used for kiosk hardware-volume control.
+    /// It must remain attached to a window and must not be hidden for iOS to back it
+    /// with the system volume control.
+    private lazy var volumeControlView: MPVolumeView = {
+        let view = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 120, height: 40))
+        view.showsVolumeSlider = true
+        view.showsRouteButton = false
+        return view
+    }()
+
+    #if os(iOS) && !targetEnvironment(macCatalyst)
+    /// Persistent native player for kiosk alarm audio.
+    ///
+    /// Audio deliberately bypasses WKWebView and therefore does not depend
+    /// on WebKit autoplay or a browser user gesture.
+    private var kioskAudioPlayer: AVAudioPlayer?
+    private var kioskAudioFileURL: URL?
+    #endif
 
     override init() {
         super.init()
@@ -143,34 +160,295 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
     }
 
     private func setScreenBrightness(_ level: Float) {
-        let clamped = CGFloat(min(max(level, 0), 1))
-        DispatchQueue.main.async {
-            UIScreen.main.brightness = clamped
-            Current.Log.info("Kiosk set screen brightness to \(clamped)")
+    let clamped = CGFloat(min(max(level, 0), 1))
+    DispatchQueue.main.async {
+        UIScreen.main.brightness = clamped
+        Current.Log.info("Kiosk set screen brightness to \(clamped)")
+    }
+}
+
+private func systemVolumeSlider(in view: UIView) -> UISlider? {
+        if let slider = view as? UISlider {
+            return slider
         }
+
+        for subview in view.subviews {
+            if let slider = systemVolumeSlider(in: subview) {
+                return slider
+            }
+        }
+
+        return nil
     }
 
     private func setSystemVolume(_ level: Float) {
         let clamped = min(max(level, 0), 1)
+
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
-                if volumeControlView.superview == nil {
-                    webViewController.view.addSubview(volumeControlView)
+
+                #if os(iOS) && !targetEnvironment(macCatalyst)
+                let audioSession = AVAudioSession.sharedInstance()
+                do {
+                    try audioSession.setCategory(.playback, mode: .default, options: [])
+                    try audioSession.setActive(true)
+                } catch {
+                    Current.Log.warning("Unable to activate audio session before kiosk volume change: \(error)")
                 }
-                // The slider only exists once the view is in the hierarchy, so read it on the next loop.
-                DispatchQueue.main.async {
-                    guard let slider = self.volumeControlView.subviews.compactMap({ $0 as? UISlider }).first else {
-                        Current.Log.error("Unable to locate system volume slider for kiosk command")
-                        return
+                #endif
+
+                if self.volumeControlView.superview == nil {
+                    webViewController.view.addSubview(self.volumeControlView)
+                }
+
+                self.volumeControlView.setNeedsLayout()
+                self.volumeControlView.layoutIfNeeded()
+
+                let applyVolume: (TimeInterval) -> Void = { [weak self] delay in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        guard let self else { return }
+
+                        self.volumeControlView.setNeedsLayout()
+                        self.volumeControlView.layoutIfNeeded()
+
+                        guard let slider = self.systemVolumeSlider(in: self.volumeControlView) else {
+                            Current.Log.error("Unable to locate system volume slider for kiosk command")
+                            return
+                        }
+
+                        slider.setValue(clamped, animated: false)
+                        slider.sendActions(for: .valueChanged)
+                        slider.sendActions(for: .touchUpInside)
+
+                        Current.Log.info(
+                            "Kiosk requested system volume \(clamped); MPVolumeView slider now \(slider.value)"
+                        )
                     }
-                    slider.setValue(clamped, animated: false)
-                    slider.sendActions(for: .touchUpInside)
-                    Current.Log.info("Kiosk set system volume to \(clamped)")
                 }
+
+                applyVolume(0.05)
+                applyVolume(0.20)
+                applyVolume(0.50)
+
+                #if os(iOS) && !targetEnvironment(macCatalyst)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                    let actual = AVAudioSession.sharedInstance().outputVolume
+                    Current.Log.info(
+                        "Kiosk system volume verification: requested=\(clamped), actual=\(actual)"
+                    )
+                }
+                #endif
             }.catch { error in
                 Current.Log.error("Failed to set volume from push command: \(error)")
             }
+    }
+    private func playKioskMedia(
+        _ command: KioskPushCommand,
+        userInfo: [AnyHashable: Any]
+    ) {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+
+        guard let mediaContentId =
+            command.mediaContentId(from: userInfo) else {
+            Current.Log.error(
+                "Ignoring \(command.rawValue): missing media_content_id in payload"
+            )
+            return
+        }
+
+        if let requestedVolume = command.level(from: userInfo) {
+            setSystemVolume(requestedVolume)
+        }
+
+        Current.Log.info(
+            "Native kiosk audio requested: \(mediaContentId)"
+        )
+
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { [weak self] webViewController in
+
+                guard let self else {
+                    return
+                }
+
+                let server = cameraServer(
+                    from: userInfo,
+                    fallback: webViewController.server
+                )
+
+                guard let api = Current.api(for: server) else {
+                    Current.Log.error(
+                        "Unable to play native kiosk media: no API available for server \(server.info.name)"
+                    )
+                    return
+                }
+
+                api.downloadMediaSource(
+                    mediaContentId,
+                    expires: 300
+                )
+                .done(on: .main) { [weak self] localFileURL in
+
+                    guard let self else {
+                        return
+                    }
+
+                    Current.Log.info(
+                        "Native kiosk media downloaded to \(localFileURL.path)"
+                    )
+
+                    startKioskAudio(
+                        fileURL: localFileURL
+                    )
+                }
+                .catch { error in
+                    Current.Log.error(
+                        "Unable to resolve/download native kiosk media \(mediaContentId): \(error)"
+                    )
+                }
+            }
+            .catch { error in
+                Current.Log.error(
+                    "Unable to access current Home Assistant web view for native kiosk audio: \(error)"
+                )
+            }
+
+        #else
+
+        Current.Log.warning(
+            "kiosk_play_media is only supported by the native iOS application"
+        )
+
+        #endif
+    }
+
+    private func startKioskAudio(
+        fileURL: URL
+    ) {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+
+        kioskAudioPlayer?.stop()
+        kioskAudioPlayer = nil
+
+        if let previousFileURL = kioskAudioFileURL,
+           previousFileURL != fileURL {
+            try? FileManager.default.removeItem(
+                at: previousFileURL
+            )
+        }
+
+        kioskAudioFileURL = fileURL
+
+        do {
+            let audioSession =
+                AVAudioSession.sharedInstance()
+
+            try audioSession.setCategory(
+                .playback,
+                mode: .default,
+                options: []
+            )
+
+            try audioSession.setActive(true)
+
+            let player = try AVAudioPlayer(
+                contentsOf: fileURL
+            )
+
+            // Hardware/system volume is controlled separately by
+            // kiosk_set_volume or the optional volume parameter.
+            player.volume = 1.0
+            player.numberOfLoops = 0
+
+            guard player.prepareToPlay() else {
+                throw NSError(
+                    domain: "HomeAssistant.KioskAudio",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "AVAudioPlayer prepareToPlay failed",
+                    ]
+                )
+            }
+
+            kioskAudioPlayer = player
+
+            guard player.play() else {
+                kioskAudioPlayer = nil
+
+                throw NSError(
+                    domain: "HomeAssistant.KioskAudio",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "AVAudioPlayer refused to start playback",
+                    ]
+                )
+            }
+
+            Current.Log.info(
+                "Native kiosk audio playback started: " +
+                    "\(fileURL.lastPathComponent), " +
+                    "duration=\(player.duration)s"
+            )
+        } catch {
+            Current.Log.error(
+                "Unable to start native kiosk audio: \(error)"
+            )
+
+            kioskAudioPlayer = nil
+
+            if let currentFileURL = kioskAudioFileURL {
+                try? FileManager.default.removeItem(
+                    at: currentFileURL
+                )
+            }
+
+            kioskAudioFileURL = nil
+        }
+
+        #endif
+    }
+
+    private func stopKioskMedia() {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+
+        Current.Log.info(
+            "Stopping native kiosk audio"
+        )
+
+        kioskAudioPlayer?.stop()
+        kioskAudioPlayer = nil
+
+        if let currentFileURL = kioskAudioFileURL {
+            try? FileManager.default.removeItem(
+                at: currentFileURL
+            )
+        }
+
+        kioskAudioFileURL = nil
+
+        do {
+            try AVAudioSession
+                .sharedInstance()
+                .setActive(
+                    false,
+                    options: .notifyOthersOnDeactivation
+                )
+        } catch {
+            Current.Log.warning(
+                "Unable to deactivate native kiosk audio session: \(error)"
+            )
+        }
+
+        #else
+
+        Current.Log.warning(
+            "kiosk_stop_media is only supported by the native iOS application"
+        )
+
+        #endif
     }
 
     func resetPushID() -> Promise<String> {
@@ -568,6 +846,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             } else {
                 Current.Log.error("Ignoring \(command.rawValue): missing or invalid volume in payload")
             }
+        case .playMedia:
+            playKioskMedia(
+                command,
+                userInfo: userInfo
+            )
+        case .stopMedia:
+            stopKioskMedia()
         case .setScreensaverMode:
             if let mode = command.screensaverMode(from: userInfo) {
                 Current.kiosk.setScreensaverMode(mode)
