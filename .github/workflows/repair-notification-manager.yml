@@ -1,0 +1,95 @@
+name: Repair NotificationManager kiosk patch
+
+on:
+  push:
+    branches:
+      - native-kiosk-audio-main
+    paths:
+      - .github/workflows/repair-notification-manager.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: native-kiosk-audio-main
+          fetch-depth: 0
+
+      - name: Repair NotificationManager.swift
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("Sources/App/Notifications/NotificationManager.swift")
+          source = path.read_text(encoding="utf-8")
+
+          broken_header = "    private func setScreenBrightness    private func systemVolumeSlider(in view: UIView) -> UISlider? {"
+          fixed_header = '''    private func setScreenBrightness(_ level: Float) {
+              let clamped = CGFloat(min(max(level, 0), 1))
+              DispatchQueue.main.async {
+                  UIScreen.main.brightness = clamped
+                  Current.Log.info("Kiosk set screen brightness to \\(clamped)")
+              }
+          }
+
+          private func systemVolumeSlider(in view: UIView) -> UISlider? {'''
+
+          if source.count(broken_header) != 1:
+              raise SystemExit(f"Expected one corrupted setScreenBrightness header, found {source.count(broken_header)}")
+          source = source.replace(broken_header, fixed_header, 1)
+
+          orphan = '''chUpInside)
+                              Current.Log.info("Kiosk set system volume to \\(clamped)")
+                          }
+                      }.catch { error in
+                          Current.Log.error("Failed to set volume from push command: \\(error)")
+                      }
+              }
+
+          '''
+
+          if source.count(orphan) != 1:
+              raise SystemExit(f"Expected one orphaned legacy volume tail, found {source.count(orphan)}")
+          source = source.replace(orphan, "", 1)
+
+          required = [
+              "private func setScreenBrightness(_ level: Float)",
+              "private func systemVolumeSlider(in view: UIView) -> UISlider?",
+              "applyVolume(0.05)",
+              "applyVolume(0.20)",
+              "applyVolume(0.50)",
+              "Kiosk system volume verification:",
+          ]
+          for token in required:
+              if token not in source:
+                  raise SystemExit(f"Required token missing after repair: {token}")
+
+          forbidden = [
+              "private func setScreenBrightness    private func",
+              "chUpInside)",
+          ]
+          for token in forbidden:
+              if token in source:
+                  raise SystemExit(f"Corruption remains after repair: {token}")
+
+          path.write_text(source, encoding="utf-8")
+          print("NotificationManager.swift repaired successfully")
+          PY
+
+      - name: Commit repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Sources/App/Notifications/NotificationManager.swift
+          git diff --cached --check
+          git commit -m "Fix corrupted kiosk volume patch"
+          git push origin HEAD:native-kiosk-audio-main
