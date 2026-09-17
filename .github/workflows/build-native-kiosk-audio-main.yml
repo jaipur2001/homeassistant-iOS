@@ -7,6 +7,9 @@ on:
       - native-kiosk-audio-main
     paths:
       - .github/workflows/build-native-kiosk-audio-main.yml
+      - Sources/App/Notifications/NotificationManager.swift
+      - Sources/App/Notifications/KioskPushCommand.swift
+      - Sources/SharedPush/Sources/NotificationParserLegacy.swift
 
 permissions:
   contents: read
