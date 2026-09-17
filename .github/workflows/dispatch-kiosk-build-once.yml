@@ -20,6 +20,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh workflow run build-native-kiosk-audio.yml \
+          gh workflow run build-native-kiosk-audio-main.yml \
             --repo "${{ github.repository }}" \
             --ref native-kiosk-audio-main
