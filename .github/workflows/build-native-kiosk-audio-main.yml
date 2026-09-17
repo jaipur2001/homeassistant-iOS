@@ -17,7 +17,7 @@ env:
 jobs:
   build:
     name: Build unsigned iOS kiosk app with Xcode 27
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
 
     steps:
@@ -29,7 +29,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "DEVELOPER_DIR=$DEVELOPER_DIR"
-          test -d "$DEVELOPER_DIR"
+
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            echo "::error::DEVELOPER_DIR does not exist: $DEVELOPER_DIR"
+            echo "Installed Xcode bundles:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Resolved Xcode: $(cd "$DEVELOPER_DIR" && pwd -P)"
           xcodebuild -version
           swift --version
           sw_vers
