@@ -10,6 +10,7 @@ struct DeleteEventSchemaIntent {
     var span: EventSpanSchemaEnum?
 
     func perform() async throws -> some IntentResult {
+        Current.Log.info("Calendar schema intent: deleting event \(entity.id)")
         let stored = try CalendarSchemaSupport.calendar(for: entity.calendar, requiring: .deleteEvent)
         let api = try CalendarSchemaSupport.api(for: stored)
 
@@ -19,6 +20,7 @@ struct DeleteEventSchemaIntent {
             recurrenceId: entity.recurrenceId,
             recurrenceRange: span?.recurrenceRange
         )
+        await CalendarSchemaSupport.refreshCachedEvents(for: [stored], touching: [entity.startDate, entity.endDate])
         return .result()
     }
 }
