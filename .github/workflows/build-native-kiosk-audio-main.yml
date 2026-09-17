@@ -1,0 +1,257 @@
+name: Build Native Kiosk Audio Main IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - native-kiosk-audio-main
+    paths:
+      - .github/workflows/build-native-kiosk-audio-main.yml
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+
+jobs:
+  build:
+    name: Build unsigned iOS kiosk app with Xcode 27
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          swift --version
+          sw_vers
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Branch: $(git branch --show-current)"
+
+          XCODE_MAJOR="$(xcodebuild -version | awk '/Xcode/{split($2,v,"."); print v[1]}')"
+          if [ "$XCODE_MAJOR" -lt 27 ]; then
+            echo "::error::Xcode 27 or newer is required for current Home Assistant main"
+            exit 1
+          fi
+
+      - name: Apply kiosk runtime patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ENVIRONMENT_FILE="Sources/Shared/Environment/Environment.swift"
+
+          python3 - "$ENVIRONMENT_FILE" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+          old = "public var Log: XCGLogger = {"
+          new = "public lazy var Log: XCGLogger = {"
+
+          count_old = source.count(old)
+          count_new = source.count(new)
+
+          if count_new == 1 and count_old == 0:
+              print("Runtime patch already present.")
+              sys.exit(0)
+
+          if count_old != 1:
+              raise SystemExit(f"Expected exactly one original logger declaration, found {count_old}")
+
+          path.write_text(source.replace(old, new, 1), encoding="utf-8")
+          print("Runtime patch applied.")
+          PY
+
+          grep -nF 'public lazy var Log: XCGLogger = {' "$ENVIRONMENT_FILE"
+
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -resolvePackageDependencies
+
+      - name: Build unsigned device app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/build"
+
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            ENABLE_DEBUG_DYLIB=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build \
+            | tee "$PWD/build/xcodebuild.log"
+
+      - name: Locate application bundle
+        id: locate_app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
+          APP_PATH="$(find "$PRODUCT_DIR" -maxdepth 1 -type d -name 'Home Assistant*.app' -print -quit)"
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Home Assistant app bundle not found in $PRODUCT_DIR"
+            find "$PWD/build/DerivedData/Build/Products" -maxdepth 3 -type d -name '*.app' -print || true
+            exit 1
+          fi
+
+          INFO_PLIST="$APP_PATH/Info.plist"
+          ORIGINAL_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")"
+          ORIGINAL_EXECUTABLE_PATH="$APP_PATH/$ORIGINAL_EXECUTABLE"
+
+          test -f "$ORIGINAL_EXECUTABLE_PATH"
+
+          if otool -L "$ORIGINAL_EXECUTABLE_PATH" | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+            echo "::error::Original executable references a debug dylib"
+            otool -L "$ORIGINAL_EXECUTABLE_PATH"
+            exit 1
+          fi
+
+          echo "Application bundle: $APP_PATH"
+          echo "Executable: $ORIGINAL_EXECUTABLE"
+          du -sh "$APP_PATH"
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Create unsigned kiosk IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          IPA_DIR="$PWD/build/ipa"
+          PAYLOAD_DIR="$IPA_DIR/Payload"
+          NORMALIZED_APP="$PAYLOAD_DIR/HomeAssistant.app"
+          NORMALIZED_EXECUTABLE="HomeAssistant"
+          IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
+
+          rm -rf "$IPA_DIR"
+          mkdir -p "$PAYLOAD_DIR"
+          ditto "$APP_PATH" "$NORMALIZED_APP"
+
+          INFO_PLIST="$NORMALIZED_APP/Info.plist"
+          ORIGINAL_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")"
+          ORIGINAL_EXECUTABLE_PATH="$NORMALIZED_APP/$ORIGINAL_EXECUTABLE"
+
+          test -f "$ORIGINAL_EXECUTABLE_PATH"
+
+          if otool -L "$ORIGINAL_EXECUTABLE_PATH" | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+            echo "::error::Original executable references a debug dylib"
+            exit 1
+          fi
+
+          mv "$ORIGINAL_EXECUTABLE_PATH" "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $NORMALIZED_EXECUTABLE" "$INFO_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName HomeAssistant" "$INFO_PLIST" || true
+
+          rm -rf "$NORMALIZED_APP/Watch"
+          rm -rf "$NORMALIZED_APP/WatchKitSupport2"
+          rm -rf "$NORMALIZED_APP/PlugIns"
+
+          find "$NORMALIZED_APP" -depth -mindepth 1 -type d -name '*.appex' -exec rm -rf {} \;
+          find "$NORMALIZED_APP" -depth -mindepth 1 -type d -name '*Watch*.app' -exec rm -rf {} \;
+
+          if find "$NORMALIZED_APP" -type d -name '*.appex' -print -quit | grep -q .; then
+            echo "::error::Embedded app extension remains after cleanup"
+            exit 1
+          fi
+
+          if [ -d "$NORMALIZED_APP/PlugIns" ] || [ -d "$NORMALIZED_APP/Watch" ] || [ -d "$NORMALIZED_APP/WatchKitSupport2" ]; then
+            echo "::error::Kiosk cleanup incomplete"
+            exit 1
+          fi
+
+          FINAL_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")"
+          if [ "$FINAL_EXECUTABLE" != "$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable normalization failed"
+            exit 1
+          fi
+
+          test -x "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          if otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+            echo "::error::Normalized executable references a debug dylib"
+            exit 1
+          fi
+
+          cd "$IPA_DIR"
+          zip -qry "HomeAssistant-Native-Kiosk-Audio-unsigned.ipa" Payload
+          test -f "$IPA_PATH"
+          ls -lh "$IPA_PATH"
+
+      - name: Verify unsigned kiosk IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
+          VERIFY_DIR="$PWD/build/ipa-verify"
+
+          unzip -t "$IPA_PATH" >/dev/null
+          rm -rf "$VERIFY_DIR"
+          mkdir -p "$VERIFY_DIR"
+          unzip -q "$IPA_PATH" -d "$VERIFY_DIR"
+
+          APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
+          INFO_PLIST="$APP_PATH/Info.plist"
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO_PLIST")"
+
+          test "$EXECUTABLE" = "HomeAssistant"
+          test -x "$APP_PATH/$EXECUTABLE"
+
+          if otool -L "$APP_PATH/$EXECUTABLE" | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+            echo "::error::Packaged executable references a debug dylib"
+            exit 1
+          fi
+
+          if [ -d "$APP_PATH/Watch" ] || [ -d "$APP_PATH/WatchKitSupport2" ] || [ -d "$APP_PATH/PlugIns" ]; then
+            echo "::error::Forbidden embedded kiosk content remains"
+            exit 1
+          fi
+
+          if find "$APP_PATH" -type d -name '*.appex' -print -quit | grep -q .; then
+            echo "::error::Packaged IPA still contains an app extension"
+            exit 1
+          fi
+
+          echo "KIOSK IPA VERIFICATION SUCCESSFUL"
+          echo "Bundle ID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")"
+          du -sh "$APP_PATH"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-Main-Xcode27-unsigned
+          path: build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: NativeKioskAudio-Main-Xcode27-xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
