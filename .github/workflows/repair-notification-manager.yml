@@ -62,6 +62,8 @@ jobs:
           required = [
               "private func setScreenBrightness(_ level: Float)",
               "private func systemVolumeSlider(in view: UIView) -> UISlider?",
+              "slider.sendActions(for: .valueChanged)",
+              "slider.sendActions(for: .touchUpInside)",
               "applyVolume(0.05)",
               "applyVolume(0.20)",
               "applyVolume(0.50)",
@@ -73,11 +75,11 @@ jobs:
 
           forbidden = [
               "private func setScreenBrightness    private func",
-              "chUpInside)",
+              "\nchUpInside)\n",
           ]
           for token in forbidden:
               if token in source:
-                  raise SystemExit(f"Corruption remains after repair: {token}")
+                  raise SystemExit(f"Corruption remains after repair: {token!r}")
 
           path.write_text(source, encoding="utf-8")
           print("NotificationManager.swift repaired successfully")
