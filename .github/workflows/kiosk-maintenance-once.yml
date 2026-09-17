@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   maintain:
-    name: Format kiosk patch and update build workflow
+    name: Format kiosk Swift sources
     runs-on: ubuntu-24.04
 
     steps:
@@ -36,43 +36,10 @@ jobs:
             Sources/App/Notifications/NotificationManagerLocalPushInterfaceExtension.swift \
             Sources/App/Notifications/NotificationManager.swift
 
-      - name: Update native kiosk IPA workflow
+      - name: Verify formatting
         shell: bash
         run: |
           set -euo pipefail
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path('.github/workflows/build-native-kiosk-audio.yml')
-          source = path.read_text(encoding='utf-8')
-
-          old_branch = "      - native-kiosk-audio\n"
-          new_branch = "      - native-kiosk-audio\n      - native-kiosk-audio-main\n"
-
-          if '      - native-kiosk-audio-main\n' not in source:
-              if source.count(old_branch) != 1:
-                  raise SystemExit('Expected exactly one native-kiosk-audio push branch entry')
-              source = source.replace(old_branch, new_branch, 1)
-
-          old_xcode = '/Applications/Xcode_26.4.app/Contents/Developer'
-          new_xcode = '/Applications/Xcode_27.0.app/Contents/Developer'
-
-          if new_xcode not in source:
-              if source.count(old_xcode) != 1:
-                  raise SystemExit('Expected exactly one Xcode 26.4 DEVELOPER_DIR entry')
-              source = source.replace(old_xcode, new_xcode, 1)
-
-          path.write_text(source, encoding='utf-8')
-          PY
-
-      - name: Verify changes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          grep -nF -- '- native-kiosk-audio-main' .github/workflows/build-native-kiosk-audio.yml
-          grep -nF '/Applications/Xcode_27.0.app/Contents/Developer' .github/workflows/build-native-kiosk-audio.yml
 
           docker run --rm \
             -v "$PWD:$PWD" \
@@ -87,12 +54,16 @@ jobs:
           git diff --check
           git status --short
 
-      - name: Commit maintenance result
+      - name: Commit formatted Swift sources
         shell: bash
         run: |
           set -euo pipefail
 
-          if git diff --quiet; then
+          if git diff --quiet -- \
+            Sources/Shared/Environment/AppConstants.swift \
+            Sources/Shared/API/HAAPI.swift \
+            Sources/App/Notifications/NotificationManagerLocalPushInterfaceExtension.swift \
+            Sources/App/Notifications/NotificationManager.swift; then
             echo 'Nothing to commit.'
             exit 0
           fi
@@ -104,8 +75,7 @@ jobs:
             Sources/Shared/Environment/AppConstants.swift \
             Sources/Shared/API/HAAPI.swift \
             Sources/App/Notifications/NotificationManagerLocalPushInterfaceExtension.swift \
-            Sources/App/Notifications/NotificationManager.swift \
-            .github/workflows/build-native-kiosk-audio.yml
+            Sources/App/Notifications/NotificationManager.swift
 
-          git commit -m 'Format kiosk patch and enable main branch IPA build'
+          git commit -m 'Format kiosk patch for upstream CI'
           git push origin HEAD:native-kiosk-audio-main
