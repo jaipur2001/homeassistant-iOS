@@ -18,10 +18,15 @@ new_view = """    /// Persistent off-screen MPVolumeView used for kiosk hardware
     }()
 """
 
-start_marker = "    private func setSystemVolume(_ level: Float) {"
-end_marker = "\n    private func playKioskMedia("
+new_section = """    private func setScreenBrightness(_ level: Float) {
+        let clamped = CGFloat(min(max(level, 0), 1))
+        DispatchQueue.main.async {
+            UIScreen.main.brightness = clamped
+            Current.Log.info("Kiosk set screen brightness to \\(clamped)")
+        }
+    }
 
-new_func = """    private func systemVolumeSlider(in view: UIView) -> UISlider? {
+    private func systemVolumeSlider(in view: UIView) -> UISlider? {
         if let slider = view as? UISlider {
             return slider
         }
@@ -99,21 +104,50 @@ new_func = """    private func systemVolumeSlider(in view: UIView) -> UISlider? 
     }
 """
 
-if "Kiosk system volume verification: requested=" in source and "width: 120, height: 40" in source:
-    print("Robust volume fix already present")
-else:
-    if source.count(old_view) != 1:
-        raise SystemExit(f"Expected one old MPVolumeView block, found {source.count(old_view)}")
-
-    start = source.find(start_marker)
-    if start == -1:
-        raise SystemExit("setSystemVolume start marker not found")
-
-    end = source.find(end_marker, start)
-    if end == -1:
-        raise SystemExit("playKioskMedia marker not found")
-
+# Normalize the MPVolumeView block independently. Never calculate offsets before
+# changing text earlier in the source file.
+if old_view in source:
     source = source.replace(old_view, new_view, 1)
-    source = source[:start] + new_func + source[end:]
-    path.write_text(source, encoding="utf-8")
-    print("Robust volume fix applied")
+elif "width: 120, height: 40" not in source:
+    raise SystemExit("Unable to locate either the old or robust MPVolumeView block")
+
+# Replace the complete brightness/volume section. This intentionally also repairs
+# any partially spliced code left by the previous one-time patch.
+start_marker = "    private func setScreenBrightness"
+end_marker = "\n    private func playKioskMedia("
+
+start = source.find(start_marker)
+if start == -1:
+    raise SystemExit("setScreenBrightness section start not found")
+
+end = source.find(end_marker, start)
+if end == -1:
+    raise SystemExit("playKioskMedia section end not found")
+
+source = source[:start] + new_section + source[end:]
+
+# Guard against the exact corruption produced by the previous patch.
+for forbidden in (
+    "setScreenBrightness    private func",
+    "\nchUpInside)",
+):
+    if forbidden in source:
+        raise SystemExit(f"Corrupt fragment still present: {forbidden!r}")
+
+required = (
+    "private func setScreenBrightness(_ level: Float)",
+    "private func systemVolumeSlider(in view: UIView) -> UISlider?",
+    "width: 120, height: 40",
+    "slider.sendActions(for: .valueChanged)",
+    "applyVolume(0.05)",
+    "applyVolume(0.20)",
+    "applyVolume(0.50)",
+    "Kiosk system volume verification: requested=",
+)
+
+for marker in required:
+    if marker not in source:
+        raise SystemExit(f"Required marker missing after repair: {marker}")
+
+path.write_text(source, encoding="utf-8")
+print("Robust iOS 26 kiosk volume section repaired successfully")
