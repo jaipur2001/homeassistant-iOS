@@ -159,7 +159,15 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
     }
 
-    private func setScreenBrightness    private func systemVolumeSlider(in view: UIView) -> UISlider? {
+    private func setScreenBrightness(_ level: Float) {
+    let clamped = CGFloat(min(max(level, 0), 1))
+    DispatchQueue.main.async {
+        UIScreen.main.brightness = clamped
+        Current.Log.info("Kiosk set screen brightness to \(clamped)")
+    }
+}
+
+private func systemVolumeSlider(in view: UIView) -> UISlider? {
         if let slider = view as? UISlider {
             return slider
         }
@@ -235,14 +243,6 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                 Current.Log.error("Failed to set volume from push command: \(error)")
             }
     }
-chUpInside)
-                    Current.Log.info("Kiosk set system volume to \(clamped)")
-                }
-            }.catch { error in
-                Current.Log.error("Failed to set volume from push command: \(error)")
-            }
-    }
-
     private func playKioskMedia(
         _ command: KioskPushCommand,
         userInfo: [AnyHashable: Any]
