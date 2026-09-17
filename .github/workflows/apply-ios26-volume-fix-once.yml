@@ -36,134 +36,120 @@ jobs:
 
           old_view = '''    /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.
               private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
-          '''.replace("              private", "    private")
+          '''
+          old_view = old_view.replace("              private", "    private").replace("          '''", "")
 
           new_view = '''    /// Persistent off-screen MPVolumeView used for kiosk hardware-volume control.
-              /// It must remain attached to a window and must not be hidden for iOS to back it
-              /// with the system volume control.
-              private lazy var volumeControlView: MPVolumeView = {
-                  let view = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 120, height: 40))
-                  view.showsVolumeSlider = true
-                  view.showsRouteButton = false
-                  return view
-              }()
-          '''
-          new_view = "\n".join(line[10:] if line.startswith("          ") else line for line in new_view.splitlines()) + "\n"
+    /// It must remain attached to a window and must not be hidden for iOS to back it
+    /// with the system volume control.
+    private lazy var volumeControlView: MPVolumeView = {
+        let view = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 120, height: 40))
+        view.showsVolumeSlider = true
+        view.showsRouteButton = false
+        return view
+    }()
+'''
 
-          old_func = '''    private func setSystemVolume(_ level: Float) {
-              let clamped = min(max(level, 0), 1)
-              Current.sceneManager.webViewControllerPromise
-                  .done(on: .main) { [weak self] webViewController in
-                      guard let self else { return }
-                      if volumeControlView.superview == nil {
-                          webViewController.view.addSubview(volumeControlView)
-                      }
-                      // The slider only exists once the view is in the hierarchy, so read it on the next loop.
-                      DispatchQueue.main.async {
-                          guard let slider = self.volumeControlView.subviews.compactMap({ $0 as? UISlider }).first else {
-                              Current.Log.error("Unable to locate system volume slider for kiosk command")
-                              return
-                          }
-                          slider.setValue(clamped, animated: false)
-                          slider.sendActions(for: .touchUpInside)
-                          Current.Log.info("Kiosk set system volume to \\(clamped)")
-                      }
-                  }.catch { error in
-                      Current.Log.error("Failed to set volume from push command: \\(error)")
-                  }
-              }
-          '''
-          old_func = "\n".join(line[10:] if line.startswith("          ") else line for line in old_func.splitlines()) + "\n"
+          start_marker = "    private func setSystemVolume(_ level: Float) {"
+          end_marker = "\n    private func playKioskMedia("
 
           new_func = '''    private func systemVolumeSlider(in view: UIView) -> UISlider? {
-              if let slider = view as? UISlider {
-                  return slider
-              }
+        if let slider = view as? UISlider {
+            return slider
+        }
 
-              for subview in view.subviews {
-                  if let slider = systemVolumeSlider(in: subview) {
-                      return slider
-                  }
-              }
+        for subview in view.subviews {
+            if let slider = systemVolumeSlider(in: subview) {
+                return slider
+            }
+        }
 
-              return nil
-          }
+        return nil
+    }
 
-              private func setSystemVolume(_ level: Float) {
-                  let clamped = min(max(level, 0), 1)
+    private func setSystemVolume(_ level: Float) {
+        let clamped = min(max(level, 0), 1)
 
-                  Current.sceneManager.webViewControllerPromise
-                      .done(on: .main) { [weak self] webViewController in
-                          guard let self else { return }
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { [weak self] webViewController in
+                guard let self else { return }
 
-                          #if os(iOS) && !targetEnvironment(macCatalyst)
-                          let audioSession = AVAudioSession.sharedInstance()
-                          do {
-                              try audioSession.setCategory(.playback, mode: .default, options: [])
-                              try audioSession.setActive(true)
-                          } catch {
-                              Current.Log.warning("Unable to activate audio session before kiosk volume change: \\(error)")
-                          }
-                          #endif
+                #if os(iOS) && !targetEnvironment(macCatalyst)
+                let audioSession = AVAudioSession.sharedInstance()
+                do {
+                    try audioSession.setCategory(.playback, mode: .default, options: [])
+                    try audioSession.setActive(true)
+                } catch {
+                    Current.Log.warning("Unable to activate audio session before kiosk volume change: \\(error)")
+                }
+                #endif
 
-                          if self.volumeControlView.superview == nil {
-                              webViewController.view.addSubview(self.volumeControlView)
-                          }
+                if self.volumeControlView.superview == nil {
+                    webViewController.view.addSubview(self.volumeControlView)
+                }
 
-                          self.volumeControlView.setNeedsLayout()
-                          self.volumeControlView.layoutIfNeeded()
+                self.volumeControlView.setNeedsLayout()
+                self.volumeControlView.layoutIfNeeded()
 
-                          let applyVolume: (TimeInterval) -> Void = { [weak self] delay in
-                              DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                                  guard let self else { return }
+                let applyVolume: (TimeInterval) -> Void = { [weak self] delay in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        guard let self else { return }
 
-                                  self.volumeControlView.setNeedsLayout()
-                                  self.volumeControlView.layoutIfNeeded()
+                        self.volumeControlView.setNeedsLayout()
+                        self.volumeControlView.layoutIfNeeded()
 
-                                  guard let slider = self.systemVolumeSlider(in: self.volumeControlView) else {
-                                      Current.Log.error("Unable to locate system volume slider for kiosk command")
-                                      return
-                                  }
+                        guard let slider = self.systemVolumeSlider(in: self.volumeControlView) else {
+                            Current.Log.error("Unable to locate system volume slider for kiosk command")
+                            return
+                        }
 
-                                  slider.setValue(clamped, animated: false)
-                                  slider.sendActions(for: .valueChanged)
-                                  slider.sendActions(for: .touchUpInside)
+                        slider.setValue(clamped, animated: false)
+                        slider.sendActions(for: .valueChanged)
+                        slider.sendActions(for: .touchUpInside)
 
-                                  Current.Log.info(
-                                      "Kiosk requested system volume \\(clamped); MPVolumeView slider now \\(slider.value)"
-                                  )
-                              }
-                          }
+                        Current.Log.info(
+                            "Kiosk requested system volume \\(clamped); MPVolumeView slider now \\(slider.value)"
+                        )
+                    }
+                }
 
-                          applyVolume(0.05)
-                          applyVolume(0.20)
-                          applyVolume(0.50)
+                applyVolume(0.05)
+                applyVolume(0.20)
+                applyVolume(0.50)
 
-                          #if os(iOS) && !targetEnvironment(macCatalyst)
-                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                              let actual = AVAudioSession.sharedInstance().outputVolume
-                              Current.Log.info(
-                                  "Kiosk system volume verification: requested=\\(clamped), actual=\\(actual)"
-                              )
-                          }
-                          #endif
-                      }.catch { error in
-                          Current.Log.error("Failed to set volume from push command: \\(error)")
-                      }
-              }
-          '''
-          new_func = "\n".join(line[10:] if line.startswith("          ") else line for line in new_func.splitlines()) + "\n"
+                #if os(iOS) && !targetEnvironment(macCatalyst)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                    let actual = AVAudioSession.sharedInstance().outputVolume
+                    Current.Log.info(
+                        "Kiosk system volume verification: requested=\\(clamped), actual=\\(actual)"
+                    )
+                }
+                #endif
+            }.catch { error in
+                Current.Log.error("Failed to set volume from push command: \\(error)")
+            }
+    }
+'''
 
-          if new_view.strip() in source and new_func.strip() in source:
+          robust_marker = "Kiosk system volume verification: requested="
+
+          if robust_marker in source and "width: 120, height: 40" in source:
               print("Robust volume fix already present.")
           else:
-              if source.count(old_view) != 1:
-                  raise SystemExit(f"Expected exactly one old MPVolumeView block, found {source.count(old_view)}")
-              if source.count(old_func) != 1:
-                  raise SystemExit(f"Expected exactly one old setSystemVolume block, found {source.count(old_func)}")
+              simple_view = "    /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.\n    private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))\n"
+              if source.count(simple_view) != 1:
+                  raise SystemExit(f"Expected exactly one old MPVolumeView block, found {source.count(simple_view)}")
 
-              source = source.replace(old_view, new_view, 1)
-              source = source.replace(old_func, new_func, 1)
+              start = source.find(start_marker)
+              if start < 0:
+                  raise SystemExit("setSystemVolume start marker not found")
+
+              end = source.find(end_marker, start)
+              if end < 0:
+                  raise SystemExit("playKioskMedia end marker not found")
+
+              source = source.replace(simple_view, new_view, 1)
+              source = source[:start] + new_func + source[end:]
               path.write_text(source, encoding="utf-8")
               print("Robust iOS 26 kiosk volume fix applied.")
           PY
