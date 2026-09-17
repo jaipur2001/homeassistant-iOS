@@ -28,6 +28,14 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
                 NotificationCenter.default.removeObserver(token)
             }
         }
+
+        // PerServerContainer is eager by default, so all currently configured
+        // servers already have a LocalPushManager here. Retry once after startup
+        // to cover the common kiosk case where the manager was constructed before
+        // the Home Assistant API/WebSocket connection became available.
+        DispatchQueue.main.async { [weak self] in
+            self?.retryAllSubscriptions()
+        }
     }
 
     func addObserver(
@@ -41,9 +49,26 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         }
     }
 
-    func retryLocalPush(for server: Server?, reason: LocalPushRetryReason) {}
+    func retryLocalPush(for server: Server?, reason: LocalPushRetryReason) {
+        if let server {
+            localPushManagers[server].retrySubscription()
+        } else {
+            retryAllSubscriptions()
+        }
+    }
 
-    func scheduleAppOpenLocalPushRetries() {}
+    func scheduleAppOpenLocalPushRetries() {
+        // NotificationManager calls this whenever the app becomes active.
+        // Force a fresh WebSocket subscription so Home Assistant sees the kiosk
+        // as connected to mobile_app local push after foregrounding/reconnecting.
+        retryAllSubscriptions()
+    }
+
+    private func retryAllSubscriptions() {
+        for server in Current.servers.all {
+            localPushManagers[server].retrySubscription()
+        }
+    }
 
     private struct Observer: Equatable {
         let identifier: UUID

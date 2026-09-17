@@ -291,14 +291,35 @@ public enum AppConstants {
     public static var AppGroupContainer: URL {
         let fileManager = FileManager.default
 
-        let groupDir = fileManager.containerURL(forSecurityApplicationGroupIdentifier: AppConstants.AppGroupID)
-
-        guard let groupDir else {
-            Current.Log.error("Unable to get app group container URL; falling back to temporary directory")
-            return URL(fileURLWithPath: NSTemporaryDirectory())
+        if let groupDir = fileManager.containerURL(
+            forSecurityApplicationGroupIdentifier: AppConstants.AppGroupID
+        ) {
+            return groupDir
         }
 
-        return groupDir
+        // This accessor can run while the global AppEnvironment (`Current`) is still being initialized.
+        // Never log through Current here: doing so can recursively initialize Current.Log and deadlock libdispatch.
+        guard let applicationSupportDirectory = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        }
+
+        let fallbackDirectory = applicationSupportDirectory
+            .appendingPathComponent("HomeAssistant", isDirectory: true)
+            .appendingPathComponent("AppGroupFallback", isDirectory: true)
+
+        do {
+            try fileManager.createDirectory(
+                at: fallbackDirectory,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            return fallbackDirectory
+        } catch {
+            return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        }
     }
 
     public static var appGRDBFile: URL {

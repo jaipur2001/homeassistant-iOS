@@ -1,3 +1,4 @@
+import AVFoundation
 import CallbackURLKit
 import FirebaseMessaging
 import Foundation
@@ -35,6 +36,15 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
     /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.
     private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
+
+    #if os(iOS) && !targetEnvironment(macCatalyst)
+    /// Persistent native player for kiosk alarm audio.
+    ///
+    /// Audio deliberately bypasses WKWebView and therefore does not depend
+    /// on WebKit autoplay or a browser user gesture.
+    private var kioskAudioPlayer: AVAudioPlayer?
+    private var kioskAudioFileURL: URL?
+    #endif
 
     override init() {
         super.init()
@@ -171,6 +181,216 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }.catch { error in
                 Current.Log.error("Failed to set volume from push command: \(error)")
             }
+    }
+
+    private func playKioskMedia(
+        _ command: KioskPushCommand,
+        userInfo: [AnyHashable: Any]
+    ) {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+
+        guard let mediaContentId =
+            command.mediaContentId(from: userInfo) else {
+            Current.Log.error(
+                "Ignoring \(command.rawValue): missing media_content_id in payload"
+            )
+            return
+        }
+
+        if let requestedVolume = command.level(from: userInfo) {
+            setSystemVolume(requestedVolume)
+        }
+
+        Current.Log.info(
+            "Native kiosk audio requested: \(mediaContentId)"
+        )
+
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { [weak self] webViewController in
+
+                guard let self else {
+                    return
+                }
+
+                let server = self.cameraServer(
+                    from: userInfo,
+                    fallback: webViewController.server
+                )
+
+                guard let api = Current.api(for: server) else {
+                    Current.Log.error(
+                        "Unable to play native kiosk media: no API available for server \(server.info.name)"
+                    )
+                    return
+                }
+
+                api.downloadMediaSource(
+                    mediaContentId,
+                    expires: 300
+                )
+                .done(on: .main) { [weak self] localFileURL in
+
+                    guard let self else {
+                        return
+                    }
+
+                    Current.Log.info(
+                        "Native kiosk media downloaded to \(localFileURL.path)"
+                    )
+
+                    self.startKioskAudio(
+                        fileURL: localFileURL
+                    )
+                }
+                .catch { error in
+                    Current.Log.error(
+                        "Unable to resolve/download native kiosk media \(mediaContentId): \(error)"
+                    )
+                }
+            }
+            .catch { error in
+                Current.Log.error(
+                    "Unable to access current Home Assistant web view for native kiosk audio: \(error)"
+                )
+            }
+
+        #else
+
+        Current.Log.warning(
+            "kiosk_play_media is only supported by the native iOS application"
+        )
+
+        #endif
+    }
+
+    private func startKioskAudio(
+        fileURL: URL
+    ) {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+
+        kioskAudioPlayer?.stop()
+        kioskAudioPlayer = nil
+
+        if let previousFileURL = kioskAudioFileURL,
+           previousFileURL != fileURL {
+            try? FileManager.default.removeItem(
+                at: previousFileURL
+            )
+        }
+
+        kioskAudioFileURL = fileURL
+
+        do {
+            let audioSession =
+                AVAudioSession.sharedInstance()
+
+            try audioSession.setCategory(
+                .playback,
+                mode: .default,
+                options: []
+            )
+
+            try audioSession.setActive(true)
+
+            let player = try AVAudioPlayer(
+                contentsOf: fileURL
+            )
+
+            // Hardware/system volume is controlled separately by
+            // kiosk_set_volume or the optional volume parameter.
+            player.volume = 1.0
+            player.numberOfLoops = 0
+
+            guard player.prepareToPlay() else {
+                throw NSError(
+                    domain: "HomeAssistant.KioskAudio",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "AVAudioPlayer prepareToPlay failed",
+                    ]
+                )
+            }
+
+            kioskAudioPlayer = player
+
+            guard player.play() else {
+
+                kioskAudioPlayer = nil
+
+                throw NSError(
+                    domain: "HomeAssistant.KioskAudio",
+                    code: 2,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "AVAudioPlayer refused to start playback",
+                    ]
+                )
+            }
+
+            Current.Log.info(
+                "Native kiosk audio playback started: " +
+                    "\(fileURL.lastPathComponent), " +
+                    "duration=\(player.duration)s"
+            )
+        } catch {
+
+            Current.Log.error(
+                "Unable to start native kiosk audio: \(error)"
+            )
+
+            kioskAudioPlayer = nil
+
+            if let currentFileURL = kioskAudioFileURL {
+                try? FileManager.default.removeItem(
+                    at: currentFileURL
+                )
+            }
+
+            kioskAudioFileURL = nil
+        }
+
+        #endif
+    }
+
+    private func stopKioskMedia() {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+
+        Current.Log.info(
+            "Stopping native kiosk audio"
+        )
+
+        kioskAudioPlayer?.stop()
+        kioskAudioPlayer = nil
+
+        if let currentFileURL = kioskAudioFileURL {
+            try? FileManager.default.removeItem(
+                at: currentFileURL
+            )
+        }
+
+        kioskAudioFileURL = nil
+
+        do {
+            try AVAudioSession
+                .sharedInstance()
+                .setActive(
+                    false,
+                    options: .notifyOthersOnDeactivation
+                )
+        } catch {
+            Current.Log.warning(
+                "Unable to deactivate native kiosk audio session: \(error)"
+            )
+        }
+
+        #else
+
+        Current.Log.warning(
+            "kiosk_stop_media is only supported by the native iOS application"
+        )
+
+        #endif
     }
 
     func resetPushID() -> Promise<String> {
@@ -568,6 +788,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             } else {
                 Current.Log.error("Ignoring \(command.rawValue): missing or invalid volume in payload")
             }
+        case .playMedia:
+            playKioskMedia(
+                command,
+                userInfo: userInfo
+            )
+        case .stopMedia:
+            stopKioskMedia()
         case .setScreensaverMode:
             if let mode = command.screensaverMode(from: userInfo) {
                 Current.kiosk.setScreensaverMode(mode)

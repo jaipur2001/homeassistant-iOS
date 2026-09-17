@@ -138,13 +138,17 @@ public struct LegacyNotificationParserImpl: LegacyNotificationParser {
             payload["entity_id"] = entityId
         }
 
-        // Pass kiosk command values (kiosk_set_brightness / kiosk_set_volume) through to the client.
+        // Pass kiosk command values through to the client.
         if let level = data["level"] {
             payload["level"] = level
         }
 
         if let volume = data["volume"] {
             payload["volume"] = volume
+        }
+
+        if let mediaContentId = data["media_content_id"] {
+            payload["media_content_id"] = mediaContentId
         }
 
         if let actionData = data["action_data"] {
@@ -322,7 +326,7 @@ enum LegacyNotificationCommandType: String {
     case clearBadge = "clear_badge"
     case clearNotification = "clear_notification"
     case updateComplications = "update_complications"
-    case updateWidgets = "update_widgets"
+    case updateWidgets = "request_widgets_update"
     case showCamera = "show_camera"
     case hideCamera = "hide_camera"
 }

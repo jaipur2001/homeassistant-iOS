@@ -10,6 +10,8 @@ enum KioskPushCommand: String, CaseIterable {
     case hideCamera = "kiosk_hide_camera"
     case setBrightness = "kiosk_set_brightness"
     case setVolume = "kiosk_set_volume"
+    case playMedia = "kiosk_play_media"
+    case stopMedia = "kiosk_stop_media"
     case setScreensaverMode = "kiosk_set_screensaver_mode"
     case setScreensaverBrightness = "kiosk_set_screensaver_brightness"
     case reload = "kiosk_reload"
@@ -34,10 +36,10 @@ enum KioskPushCommand: String, CaseIterable {
         switch self {
         case .setBrightness, .setScreensaverBrightness:
             return "level"
-        case .setVolume:
+        case .setVolume, .playMedia:
             return "volume"
-        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .setScreensaverMode, .reload,
-             .defaultDashboard:
+        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .stopMedia, .setScreensaverMode,
+             .reload, .defaultDashboard:
             return nil
         }
     }
@@ -47,7 +49,7 @@ enum KioskPushCommand: String, CaseIterable {
         case .setScreensaverMode:
             return "mode"
         case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .setBrightness, .setVolume,
-             .setScreensaverBrightness, .reload, .defaultDashboard:
+             .playMedia, .stopMedia, .setScreensaverBrightness, .reload, .defaultDashboard:
             return nil
         }
     }
@@ -98,6 +100,17 @@ enum KioskPushCommand: String, CaseIterable {
         return KioskScreensaverMode(rawValue: normalized)
     }
 
+    func mediaContentId(from userInfo: [AnyHashable: Any]?) -> String? {
+        guard let userInfo,
+              let value = Self.stringValue(forKey: "media_content_id", in: userInfo)?
+              .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        return value
+    }
+
     private static func stringValue(forKey key: String, in userInfo: [AnyHashable: Any]) -> String? {
         if let value = userInfo[key] as? String {
             return value
@@ -127,6 +140,10 @@ enum KioskPushCommand: String, CaseIterable {
             return L10n.Kiosk.PushCommand.setBrightness
         case .setVolume:
             return L10n.Kiosk.PushCommand.setVolume
+        case .playMedia:
+            return "Play media"
+        case .stopMedia:
+            return "Stop media"
         case .setScreensaverMode:
             return L10n.Kiosk.PushCommand.setScreensaverMode
         case .setScreensaverBrightness:
@@ -156,6 +173,10 @@ enum KioskPushCommand: String, CaseIterable {
             return .sunMax
         case .setVolume:
             return .speakerWave3Fill
+        case .playMedia:
+            return .playCircleFill
+        case .stopMedia:
+            return .stopCircleFill
         case .setScreensaverMode:
             return .moonStars
         case .setScreensaverBrightness:
@@ -195,6 +216,10 @@ enum KioskPushCommand: String, CaseIterable {
             return (.white, .yellow)
         case .setVolume:
             return (.white, .teal)
+        case .playMedia:
+            return (.white, .red)
+        case .stopMedia:
+            return (.white, .gray)
         case .setScreensaverMode:
             return (.white, .purple)
         case .setScreensaverBrightness:

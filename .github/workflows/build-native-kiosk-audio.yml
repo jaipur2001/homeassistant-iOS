@@ -1,0 +1,1114 @@
+name: Build Native Kiosk Audio IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - native-kiosk-audio
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+
+jobs:
+  build:
+    name: Build unsigned iOS kiosk app
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      # =====================================================================
+      # Repository
+      # =====================================================================
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # =====================================================================
+      # Umgebung anzeigen
+      # =====================================================================
+
+      - name: Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Xcode:"
+          xcodebuild -version
+
+          echo ""
+          echo "Swift:"
+          swift --version
+
+          echo ""
+          echo "macOS:"
+          sw_vers
+
+          echo ""
+          echo "Commit:"
+          git rev-parse HEAD
+
+          echo ""
+          echo "Branch:"
+          git branch --show-current
+
+      # =====================================================================
+      # Home-Assistant Runtime-Patch
+      #
+      # Problem:
+      #
+      # AppEnvironment initialisiert den Logger eager:
+      #
+      #   public var Log: XCGLogger = {
+      #
+      # Während dieser Initialisierung wird über AppConstants erneut auf
+      # Current / DependencyValues.environment zugegriffen.
+      #
+      # Auf dem Gerät führte das zu:
+      #
+      #   BUG IN CLIENT OF LIBDISPATCH:
+      #   trying to lock recursively
+      #
+      # Lösung:
+      #
+      # Logger erst beim ersten Zugriff erzeugen:
+      #
+      #   public lazy var Log: XCGLogger = {
+      #
+      # Der Patch ist absichtlich streng. Falls sich Upstream ändert,
+      # bricht der Workflow ab, statt unbemerkt eine andere Stelle zu
+      # verändern.
+      # =====================================================================
+
+      - name: Apply kiosk runtime patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ENVIRONMENT_FILE="Sources/Shared/Environment/Environment.swift"
+
+          echo "Patching:"
+          echo "$ENVIRONMENT_FILE"
+
+          if [ ! -f "$ENVIRONMENT_FILE" ]; then
+            echo "::error::Environment.swift not found:"
+            echo "$ENVIRONMENT_FILE"
+            exit 1
+          fi
+
+          python3 - "$ENVIRONMENT_FILE" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+
+          source = path.read_text(encoding="utf-8")
+
+          old = "public var Log: XCGLogger = {"
+          new = "public lazy var Log: XCGLogger = {"
+
+          count_old = source.count(old)
+          count_new = source.count(new)
+
+          print(f"Occurrences of original declaration: {count_old}")
+          print(f"Occurrences of patched declaration:  {count_new}")
+
+          if count_new == 1 and count_old == 0:
+              print("Runtime patch is already present.")
+              sys.exit(0)
+
+          if count_old != 1:
+              print(
+                  f"ERROR: Expected exactly one occurrence of:\n"
+                  f"  {old}\n"
+                  f"but found {count_old}."
+              )
+              sys.exit(1)
+
+          source = source.replace(old, new, 1)
+
+          path.write_text(source, encoding="utf-8")
+
+          print("Runtime patch applied successfully.")
+          PY
+
+          echo ""
+          echo "Patched declaration:"
+
+          grep -nF \
+            'public lazy var Log: XCGLogger = {' \
+            "$ENVIRONMENT_FILE"
+
+          echo ""
+          echo "Git diff:"
+
+          git diff -- "$ENVIRONMENT_FILE"
+
+          if ! grep -F \
+            'public lazy var Log: XCGLogger = {' \
+            "$ENVIRONMENT_FILE" >/dev/null; then
+
+            echo "::error::Runtime patch verification failed"
+            exit 1
+          fi
+
+          echo ""
+          echo "Runtime patch verified."
+
+      # =====================================================================
+      # Swift Package Manager
+      #
+      # KEIN -sdk iphoneos!
+      #
+      # Xcode muss selbst entscheiden, welche Abhängigkeiten für iOS bzw.
+      # watchOS mit welchem SDK gebaut werden.
+      # =====================================================================
+
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -resolvePackageDependencies
+
+      # =====================================================================
+      # Unsigned iOS Device Build
+      #
+      # Wichtig:
+      #
+      #   -destination generic/platform=iOS
+      #
+      # aber bewusst KEIN:
+      #
+      #   -sdk iphoneos
+      #
+      # Sonst werden auch watchOS-Abhängigkeiten auf iphoneos gezwungen.
+      #
+      #
+      # ENABLE_DEBUG_DYLIB=NO
+      #
+      # Xcode kann bei Debug-Builds ein Stub-Executable erzeugen, welches
+      # den eigentlichen App-Code aus:
+      #
+      #   <AppName>.debug.dylib
+      #
+      # lädt.
+      #
+      # Genau das führte auf dem iPad zum früheren Start-Crash:
+      #
+      #   Termination Reason: DYLD
+      #   Library missing
+      #
+      # Für unsere eigenständig signierte Kiosk-IPA wird dieses Layout
+      # deshalb explizit deaktiviert.
+      # =====================================================================
+
+      - name: Build unsigned device app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$PWD/build"
+
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            ENABLE_DEBUG_DYLIB=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build \
+            | tee "$PWD/build/xcodebuild.log"
+
+      # =====================================================================
+      # Build-Produkt suchen
+      # =====================================================================
+
+      - name: Locate application bundle
+        id: locate_app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
+
+          echo "Build products:"
+
+          find "$PWD/build/DerivedData/Build/Products" \
+            -maxdepth 3 \
+            -type d \
+            -name '*.app' \
+            -print || true
+
+          APP_PATH="$(
+            find "$PRODUCT_DIR" \
+              -maxdepth 1 \
+              -type d \
+              -name 'Home Assistant*.app' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Home Assistant application bundle not found in $PRODUCT_DIR"
+            exit 1
+          fi
+
+          INFO_PLIST="$APP_PATH/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Info.plist not found:"
+            echo "$INFO_PLIST"
+            exit 1
+          fi
+
+          ORIGINAL_EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          if [ -z "$ORIGINAL_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable is empty"
+            exit 1
+          fi
+
+          ORIGINAL_EXECUTABLE_PATH="$APP_PATH/$ORIGINAL_EXECUTABLE"
+
+          if [ ! -f "$ORIGINAL_EXECUTABLE_PATH" ]; then
+            echo "::error::Executable not found:"
+            echo "$ORIGINAL_EXECUTABLE_PATH"
+            exit 1
+          fi
+
+          echo ""
+          echo "Application bundle:"
+          echo "$APP_PATH"
+
+          echo ""
+          echo "Application bundle size:"
+          du -sh "$APP_PATH"
+
+          echo ""
+          echo "CFBundleExecutable:"
+          echo "$ORIGINAL_EXECUTABLE"
+
+          echo ""
+          echo "Executable:"
+          ls -lh "$ORIGINAL_EXECUTABLE_PATH"
+
+          echo ""
+          echo "Executable type:"
+          file "$ORIGINAL_EXECUTABLE_PATH"
+
+          echo ""
+          echo "Mach-O dependencies:"
+          otool -L "$ORIGINAL_EXECUTABLE_PATH"
+
+          echo ""
+          echo "Checking original executable for debug dylib dependency..."
+
+          if otool -L "$ORIGINAL_EXECUTABLE_PATH" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Original executable still references a debug dylib:"
+
+            otool -L "$ORIGINAL_EXECUTABLE_PATH" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found."
+
+          echo ""
+          echo "Embedded applications/extensions before kiosk cleanup:"
+
+          find "$APP_PATH" \
+            -mindepth 1 \
+            -maxdepth 6 \
+            \( \
+              -type d -name '*.app' \
+              -o \
+              -type d -name '*.appex' \
+              -o \
+              -type d -name 'Watch' \
+              -o \
+              -type d -name 'WatchKitSupport2' \
+              -o \
+              -type d -name 'PlugIns' \
+            \) \
+            -print || true
+
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # Unsigned Kiosk-IPA erstellen
+      #
+      # Home Assistant erzeugt aktuell:
+      #
+      #   Home Assistant Δ.app
+      #   Home Assistant Δ
+      #
+      # Sideloadly verarbeitet den Unicode-Namen problematisch.
+      #
+      # Deshalb:
+      #
+      #   Home Assistant Δ.app  -> HomeAssistant.app
+      #   Home Assistant Δ      -> HomeAssistant
+      #
+      #
+      # KIOSK-CLEANUP
+      #
+      # Auf diesem iPad benötigen wir ausschließlich die Haupt-App.
+      #
+      # Entfernt werden:
+      #
+      #   - Apple-Watch-App
+      #   - WatchKitSupport2
+      #   - Widgets
+      #   - Intents-/Share-/sonstige App Extensions
+      #   - komplettes PlugIns-Verzeichnis
+      #   - alle verbleibenden *.appex
+      #
+      # NICHT entfernt werden:
+      #
+      #   - Frameworks
+      #   - Swift Libraries
+      #   - *.bundle
+      #   - Assets
+      #   - Resources
+      #   - Daten/Komponenten der Haupt-App
+      #
+      # Dadurch vermeiden wir insbesondere das bereits beobachtete:
+      #
+      #   HomeAssistant-Extensions-Widgets
+      #   CODESIGNING: Invalid Page
+      # =====================================================================
+
+      - name: Create unsigned kiosk IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+
+          IPA_DIR="$PWD/build/ipa"
+          PAYLOAD_DIR="$IPA_DIR/Payload"
+
+          NORMALIZED_APP="$PAYLOAD_DIR/HomeAssistant.app"
+          NORMALIZED_EXECUTABLE="HomeAssistant"
+
+          IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
+
+          echo "Source application bundle:"
+          echo "$APP_PATH"
+
+          echo ""
+          echo "Preparing IPA directory..."
+
+          rm -rf "$IPA_DIR"
+          mkdir -p "$PAYLOAD_DIR"
+
+          # ---------------------------------------------------------------
+          # App-Bundle vollständig kopieren
+          #
+          # ditto erhält Rechte, Extended Attributes und Symlinks sauber.
+          # ---------------------------------------------------------------
+
+          ditto \
+            "$APP_PATH" \
+            "$NORMALIZED_APP"
+
+          INFO_PLIST="$NORMALIZED_APP/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Copied Info.plist not found:"
+            echo "$INFO_PLIST"
+            exit 1
+          fi
+
+          echo ""
+          echo "Copied application size before kiosk cleanup:"
+          du -sh "$NORMALIZED_APP"
+
+          # ---------------------------------------------------------------
+          # Ursprüngliches Executable bestimmen
+          # ---------------------------------------------------------------
+
+          ORIGINAL_EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          echo ""
+          echo "Original CFBundleExecutable:"
+          echo "$ORIGINAL_EXECUTABLE"
+
+          if [ -z "$ORIGINAL_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable is empty"
+            exit 1
+          fi
+
+          ORIGINAL_EXECUTABLE_PATH="$NORMALIZED_APP/$ORIGINAL_EXECUTABLE"
+
+          if [ ! -f "$ORIGINAL_EXECUTABLE_PATH" ]; then
+            echo "::error::Original executable not found:"
+            echo "$ORIGINAL_EXECUTABLE_PATH"
+            exit 1
+          fi
+
+          # ---------------------------------------------------------------
+          # Mach-O vor jeglicher Manipulation prüfen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Original executable Mach-O dependencies:"
+          otool -L "$ORIGINAL_EXECUTABLE_PATH"
+
+          echo ""
+          echo "Checking original executable for debug dylib dependency..."
+
+          if otool -L "$ORIGINAL_EXECUTABLE_PATH" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Original executable still references a debug dylib:"
+
+            otool -L "$ORIGINAL_EXECUTABLE_PATH" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found in original executable."
+
+          # ---------------------------------------------------------------
+          # Executable auf ASCII-Namen normalisieren
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Renaming executable:"
+          echo "  $ORIGINAL_EXECUTABLE"
+          echo "  ->"
+          echo "  $NORMALIZED_EXECUTABLE"
+
+          mv \
+            "$ORIGINAL_EXECUTABLE_PATH" \
+            "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          # ---------------------------------------------------------------
+          # Info.plist anpassen
+          # ---------------------------------------------------------------
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleExecutable $NORMALIZED_EXECUTABLE" \
+            "$INFO_PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleName HomeAssistant" \
+            "$INFO_PLIST" || true
+
+          # ---------------------------------------------------------------
+          # KIOSK-CLEANUP
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "============================================================"
+          echo "KIOSK CLEANUP"
+          echo "============================================================"
+
+          echo ""
+          echo "Embedded content before cleanup:"
+
+          find "$NORMALIZED_APP" \
+            -mindepth 1 \
+            -maxdepth 8 \
+            \( \
+              -type d -name '*.app' \
+              -o \
+              -type d -name '*.appex' \
+              -o \
+              -type d -name 'Watch' \
+              -o \
+              -type d -name 'WatchKitSupport2' \
+              -o \
+              -type d -name 'PlugIns' \
+            \) \
+            -print || true
+
+          # ---------------------------------------------------------------
+          # Apple Watch entfernen
+          # ---------------------------------------------------------------
+
+          if [ -d "$NORMALIZED_APP/Watch" ]; then
+            echo ""
+            echo "Removing Watch directory:"
+            echo "$NORMALIZED_APP/Watch"
+
+            rm -rf "$NORMALIZED_APP/Watch"
+          else
+            echo ""
+            echo "No Watch directory found."
+          fi
+
+          # ---------------------------------------------------------------
+          # WatchKit-Support entfernen
+          # ---------------------------------------------------------------
+
+          if [ -d "$NORMALIZED_APP/WatchKitSupport2" ]; then
+            echo ""
+            echo "Removing WatchKitSupport2:"
+            echo "$NORMALIZED_APP/WatchKitSupport2"
+
+            rm -rf "$NORMALIZED_APP/WatchKitSupport2"
+          else
+            echo ""
+            echo "No WatchKitSupport2 directory found."
+          fi
+
+          # ---------------------------------------------------------------
+          # PlugIns entfernen
+          #
+          # Hier befinden sich regulär:
+          #
+          #   Widgets
+          #   Intents
+          #   Notification Extensions
+          #   Share Extensions
+          #   weitere *.appex
+          #
+          # Für den Kiosk nicht benötigt.
+          # ---------------------------------------------------------------
+
+          if [ -d "$NORMALIZED_APP/PlugIns" ]; then
+            echo ""
+            echo "Removing complete PlugIns directory:"
+
+            find "$NORMALIZED_APP/PlugIns" \
+              -maxdepth 4 \
+              -print || true
+
+            rm -rf "$NORMALIZED_APP/PlugIns"
+          else
+            echo ""
+            echo "No PlugIns directory found."
+          fi
+
+          # ---------------------------------------------------------------
+          # Falls irgendwo außerhalb von PlugIns weitere *.appex liegen,
+          # ebenfalls entfernen.
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Searching for remaining app extensions..."
+
+          find "$NORMALIZED_APP" \
+            -depth \
+            -mindepth 1 \
+            -type d \
+            -name '*.appex' \
+            -print \
+            -exec rm -rf {} \;
+
+          # ---------------------------------------------------------------
+          # Verbleibende eingebettete Watch-Apps entfernen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Searching for remaining embedded Watch apps..."
+
+          find "$NORMALIZED_APP" \
+            -depth \
+            -mindepth 1 \
+            -type d \
+            -name '*Watch*.app' \
+            -print \
+            -exec rm -rf {} \;
+
+          # ---------------------------------------------------------------
+          # Kiosk-Cleanup kontrollieren
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Verifying kiosk cleanup..."
+
+          REMAINING_APPEX="$(
+            find "$NORMALIZED_APP" \
+              -type d \
+              -name '*.appex' \
+              -print \
+              -quit || true
+          )"
+
+          if [ -n "$REMAINING_APPEX" ]; then
+            echo "::error::Embedded app extension still present:"
+            echo "$REMAINING_APPEX"
+            exit 1
+          fi
+
+          if [ -d "$NORMALIZED_APP/PlugIns" ]; then
+            echo "::error::PlugIns directory still exists"
+            exit 1
+          fi
+
+          if [ -d "$NORMALIZED_APP/Watch" ]; then
+            echo "::error::Watch directory still exists"
+            exit 1
+          fi
+
+          if [ -d "$NORMALIZED_APP/WatchKitSupport2" ]; then
+            echo "::error::WatchKitSupport2 directory still exists"
+            exit 1
+          fi
+
+          REMAINING_WATCH_APP="$(
+            find "$NORMALIZED_APP" \
+              -mindepth 1 \
+              -type d \
+              -name '*Watch*.app' \
+              -print \
+              -quit || true
+          )"
+
+          if [ -n "$REMAINING_WATCH_APP" ]; then
+            echo "::error::Embedded Watch application still present:"
+            echo "$REMAINING_WATCH_APP"
+            exit 1
+          fi
+
+          echo ""
+          echo "Kiosk cleanup successful:"
+          echo "  Watch:             removed"
+          echo "  WatchKitSupport2:  removed"
+          echo "  PlugIns:           removed"
+          echo "  App extensions:    none"
+
+          echo ""
+          echo "Application size after kiosk cleanup:"
+          du -sh "$NORMALIZED_APP"
+
+          # ---------------------------------------------------------------
+          # Normalisiertes Bundle überprüfen
+          # ---------------------------------------------------------------
+
+          FINAL_EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          echo ""
+          echo "Normalized CFBundleExecutable:"
+          echo "$FINAL_EXECUTABLE"
+
+          if [ "$FINAL_EXECUTABLE" != "$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::CFBundleExecutable normalization failed"
+            exit 1
+          fi
+
+          if [ ! -f "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::Normalized executable does not exist:"
+            echo "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+            exit 1
+          fi
+
+          if [ ! -x "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
+            echo "::error::Normalized executable is not executable"
+            exit 1
+          fi
+
+          echo ""
+          echo "Normalized executable:"
+          ls -lh "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          echo ""
+          echo "Executable type:"
+          file "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          # ---------------------------------------------------------------
+          # Mach-O nach Umbenennung erneut prüfen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Normalized executable Mach-O dependencies:"
+          otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+
+          echo ""
+          echo "Checking normalized executable for debug dylib dependency..."
+
+          if otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Normalized executable still references a debug dylib:"
+
+            otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found in normalized executable."
+
+          # ---------------------------------------------------------------
+          # Info.plist anzeigen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Important Info.plist values:"
+
+          echo ""
+          echo "CFBundleIdentifier:"
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' \
+            "$INFO_PLIST" || true
+
+          echo ""
+          echo "CFBundleName:"
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleName' \
+            "$INFO_PLIST" || true
+
+          echo ""
+          echo "CFBundleDisplayName:"
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleDisplayName' \
+            "$INFO_PLIST" || true
+
+          echo ""
+          echo "CFBundleExecutable:"
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleExecutable' \
+            "$INFO_PLIST"
+
+          # ---------------------------------------------------------------
+          # Frameworks / Bundles zur Information anzeigen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Frameworks retained:"
+
+          if [ -d "$NORMALIZED_APP/Frameworks" ]; then
+            find "$NORMALIZED_APP/Frameworks" \
+              -maxdepth 2 \
+              -type d \
+              -name '*.framework' \
+              -print || true
+          else
+            echo "No Frameworks directory."
+          fi
+
+          echo ""
+          echo "Resource bundles retained:"
+
+          find "$NORMALIZED_APP" \
+            -type d \
+            -name '*.bundle' \
+            -print || true
+
+          # ---------------------------------------------------------------
+          # IPA erzeugen
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Creating IPA..."
+
+          cd "$IPA_DIR"
+
+          zip -qry \
+            "HomeAssistant-Native-Kiosk-Audio-unsigned.ipa" \
+            Payload
+
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA was not created"
+            exit 1
+          fi
+
+          echo ""
+          echo "Created IPA:"
+          ls -lh "$IPA_PATH"
+
+      # =====================================================================
+      # Fertige IPA vollständig kontrollieren
+      #
+      # Die tatsächlich erzeugte IPA wird wieder entpackt.
+      #
+      # Dadurch prüfen wir exakt das Artefakt, das anschließend an
+      # Sideloadly übergeben wird.
+      # =====================================================================
+
+      - name: Verify unsigned kiosk IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
+          VERIFY_DIR="$PWD/build/ipa-verify"
+
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA does not exist:"
+            echo "$IPA_PATH"
+            exit 1
+          fi
+
+          rm -rf "$VERIFY_DIR"
+          mkdir -p "$VERIFY_DIR"
+
+          # ---------------------------------------------------------------
+          # ZIP-Struktur prüfen
+          # ---------------------------------------------------------------
+
+          echo "Testing ZIP integrity..."
+
+          unzip -t "$IPA_PATH"
+
+          # ---------------------------------------------------------------
+          # IPA entpacken
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Extracting IPA..."
+
+          unzip -q \
+            "$IPA_PATH" \
+            -d "$VERIFY_DIR"
+
+          APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
+          INFO_PLIST="$APP_PATH/Info.plist"
+
+          # ---------------------------------------------------------------
+          # Haupt-App prüfen
+          # ---------------------------------------------------------------
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Payload/HomeAssistant.app not found"
+            exit 1
+          fi
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Info.plist not found in packaged IPA"
+            exit 1
+          fi
+
+          EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          echo ""
+          echo "Packaged CFBundleExecutable:"
+          echo "$EXECUTABLE"
+
+          if [ "$EXECUTABLE" != "HomeAssistant" ]; then
+            echo "::error::Unexpected CFBundleExecutable:"
+            echo "$EXECUTABLE"
+            exit 1
+          fi
+
+          if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
+            echo "::error::Executable missing from packaged IPA:"
+            echo "$APP_PATH/$EXECUTABLE"
+            exit 1
+          fi
+
+          if [ ! -x "$APP_PATH/$EXECUTABLE" ]; then
+            echo "::error::Packaged executable is not executable"
+            exit 1
+          fi
+
+          echo ""
+          echo "Packaged application size:"
+          du -sh "$APP_PATH"
+
+          echo ""
+          echo "Packaged executable:"
+          ls -lh "$APP_PATH/$EXECUTABLE"
+
+          echo ""
+          echo "Executable type:"
+          file "$APP_PATH/$EXECUTABLE"
+
+          # ---------------------------------------------------------------
+          # Mach-O-Abhängigkeiten
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Mach-O dependencies:"
+          otool -L "$APP_PATH/$EXECUTABLE"
+
+          echo ""
+          echo "Checking for debug dylib dependency..."
+
+          if otool -L "$APP_PATH/$EXECUTABLE" \
+            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
+
+            echo "::error::Main executable still references a debug dylib:"
+
+            otool -L "$APP_PATH/$EXECUTABLE" \
+              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
+
+            exit 1
+          fi
+
+          echo "No debug dylib dependency found."
+
+          # ---------------------------------------------------------------
+          # Bundle Identifier
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Bundle identifier:"
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' \
+            "$INFO_PLIST"
+
+          # ---------------------------------------------------------------
+          # Kiosk-Struktur verifizieren
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Checking kiosk structure..."
+
+          if [ -d "$APP_PATH/Watch" ]; then
+            echo "::error::Watch directory still present"
+            exit 1
+          fi
+
+          if [ -d "$APP_PATH/WatchKitSupport2" ]; then
+            echo "::error::WatchKitSupport2 directory still present"
+            exit 1
+          fi
+
+          if [ -d "$APP_PATH/PlugIns" ]; then
+            echo "::error::PlugIns directory still present"
+            exit 1
+          fi
+
+          REMAINING_APPEX="$(
+            find "$APP_PATH" \
+              -type d \
+              -name '*.appex' \
+              -print \
+              -quit || true
+          )"
+
+          if [ -n "$REMAINING_APPEX" ]; then
+            echo "::error::Embedded app extension still present:"
+            echo "$REMAINING_APPEX"
+            exit 1
+          fi
+
+          REMAINING_WATCH_APP="$(
+            find "$APP_PATH" \
+              -mindepth 1 \
+              -type d \
+              -name '*Watch*.app' \
+              -print \
+              -quit || true
+          )"
+
+          if [ -n "$REMAINING_WATCH_APP" ]; then
+            echo "::error::Embedded Watch application still present:"
+            echo "$REMAINING_WATCH_APP"
+            exit 1
+          fi
+
+          echo ""
+          echo "Kiosk payload structure verified:"
+          echo "  Watch:             none"
+          echo "  WatchKitSupport2:  none"
+          echo "  PlugIns:           none"
+          echo "  App extensions:    none"
+
+          # ---------------------------------------------------------------
+          # Sicherstellen, dass zentrale Ressourcen der Haupt-App weiterhin
+          # vorhanden sind.
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "Retained application content:"
+
+          find "$APP_PATH" \
+            -mindepth 1 \
+            -maxdepth 2 \
+            -type d \
+            -print \
+            | sort
+
+          echo ""
+          echo "Framework count:"
+
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            find "$APP_PATH/Frameworks" \
+              -type d \
+              -name '*.framework' \
+              | wc -l
+          else
+            echo "0"
+          fi
+
+          echo ""
+          echo "Resource bundle count:"
+
+          find "$APP_PATH" \
+            -type d \
+            -name '*.bundle' \
+            | wc -l
+
+          # ---------------------------------------------------------------
+          # Abschluss
+          # ---------------------------------------------------------------
+
+          echo ""
+          echo "============================================================"
+          echo "KIOSK IPA VERIFICATION SUCCESSFUL"
+          echo "============================================================"
+          echo ""
+          echo "CFBundleExecutable:"
+          echo "$EXECUTABLE"
+          echo ""
+          echo "Checks:"
+          echo "  [OK] Main executable exists"
+          echo "  [OK] Main executable is executable"
+          echo "  [OK] No *.debug.dylib dependency"
+          echo "  [OK] No Watch app"
+          echo "  [OK] No WatchKitSupport2"
+          echo "  [OK] No PlugIns directory"
+          echo "  [OK] No *.appex extensions"
+          echo ""
+          echo "IPA is ready for external signing."
+
+      # =====================================================================
+      # IPA als GitHub Artifact bereitstellen
+      # =====================================================================
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-unsigned
+          path: build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      # =====================================================================
+      # Xcode-Buildlog immer bereitstellen
+      # =====================================================================
+
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: NativeKioskAudio-xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
