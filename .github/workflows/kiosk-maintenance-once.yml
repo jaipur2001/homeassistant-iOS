@@ -1,0 +1,111 @@
+name: Kiosk Main Maintenance Once
+
+on:
+  push:
+    branches:
+      - native-kiosk-audio-main
+    paths:
+      - .github/workflows/kiosk-maintenance-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  maintain:
+    name: Format kiosk patch and update build workflow
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: native-kiosk-audio-main
+
+      - name: Format kiosk Swift sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            ghcr.io/nicklockwood/swiftformat:0.53.1 \
+            --config .swiftformat \
+            Sources/Shared/Environment/AppConstants.swift \
+            Sources/Shared/API/HAAPI.swift \
+            Sources/App/Notifications/NotificationManagerLocalPushInterfaceExtension.swift \
+            Sources/App/Notifications/NotificationManager.swift
+
+      - name: Update native kiosk IPA workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/build-native-kiosk-audio.yml')
+          source = path.read_text(encoding='utf-8')
+
+          old_branch = "      - native-kiosk-audio\n"
+          new_branch = "      - native-kiosk-audio\n      - native-kiosk-audio-main\n"
+
+          if '      - native-kiosk-audio-main\n' not in source:
+              if source.count(old_branch) != 1:
+                  raise SystemExit('Expected exactly one native-kiosk-audio push branch entry')
+              source = source.replace(old_branch, new_branch, 1)
+
+          old_xcode = '/Applications/Xcode_26.4.app/Contents/Developer'
+          new_xcode = '/Applications/Xcode_27.0.app/Contents/Developer'
+
+          if new_xcode not in source:
+              if source.count(old_xcode) != 1:
+                  raise SystemExit('Expected exactly one Xcode 26.4 DEVELOPER_DIR entry')
+              source = source.replace(old_xcode, new_xcode, 1)
+
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Verify changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -nF -- '- native-kiosk-audio-main' .github/workflows/build-native-kiosk-audio.yml
+          grep -nF '/Applications/Xcode_27.0.app/Contents/Developer' .github/workflows/build-native-kiosk-audio.yml
+
+          docker run --rm \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            ghcr.io/nicklockwood/swiftformat:0.53.1 \
+            --lint --config .swiftformat \
+            Sources/Shared/Environment/AppConstants.swift \
+            Sources/Shared/API/HAAPI.swift \
+            Sources/App/Notifications/NotificationManagerLocalPushInterfaceExtension.swift \
+            Sources/App/Notifications/NotificationManager.swift
+
+          git diff --check
+          git status --short
+
+      - name: Commit maintenance result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo 'Nothing to commit.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add \
+            Sources/Shared/Environment/AppConstants.swift \
+            Sources/Shared/API/HAAPI.swift \
+            Sources/App/Notifications/NotificationManagerLocalPushInterfaceExtension.swift \
+            Sources/App/Notifications/NotificationManager.swift \
+            .github/workflows/build-native-kiosk-audio.yml
+
+          git commit -m 'Format kiosk patch and enable main branch IPA build'
+          git push origin HEAD:native-kiosk-audio-main
