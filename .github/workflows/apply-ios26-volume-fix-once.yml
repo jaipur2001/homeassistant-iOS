@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,26 +19,22 @@ jobs:
         with:
           ref: native-kiosk-audio-main
 
-      - name: Restore robust iOS 26 kiosk volume control
+      - name: Patch volume control
         shell: bash
         run: |
           set -euo pipefail
-
           FILE="Sources/App/Notifications/NotificationManager.swift"
-
-          python3 - "$FILE" <<'PY'
+          python3 <<'PY'
           from pathlib import Path
-          import sys
 
-          path = Path(sys.argv[1])
+          path = Path("Sources/App/Notifications/NotificationManager.swift")
           source = path.read_text(encoding="utf-8")
 
-          old_view = '''    /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.
-              private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
-          '''
-          old_view = old_view.replace("              private", "    private").replace("          '''", "")
+          old_view = """    /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.
+    private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
+"""
 
-          new_view = '''    /// Persistent off-screen MPVolumeView used for kiosk hardware-volume control.
+          new_view = """    /// Persistent off-screen MPVolumeView used for kiosk hardware-volume control.
     /// It must remain attached to a window and must not be hidden for iOS to back it
     /// with the system volume control.
     private lazy var volumeControlView: MPVolumeView = {
@@ -48,12 +43,12 @@ jobs:
         view.showsRouteButton = false
         return view
     }()
-'''
+"""
 
           start_marker = "    private func setSystemVolume(_ level: Float) {"
           end_marker = "\n    private func playKioskMedia("
 
-          new_func = '''    private func systemVolumeSlider(in view: UIView) -> UISlider? {
+          new_func = """    private func systemVolumeSlider(in view: UIView) -> UISlider? {
         if let slider = view as? UISlider {
             return slider
         }
@@ -129,29 +124,26 @@ jobs:
                 Current.Log.error("Failed to set volume from push command: \\(error)")
             }
     }
-'''
+"""
 
-          robust_marker = "Kiosk system volume verification: requested="
-
-          if robust_marker in source and "width: 120, height: 40" in source:
-              print("Robust volume fix already present.")
+          if "Kiosk system volume verification: requested=" in source and "width: 120, height: 40" in source:
+              print("Robust volume fix already present")
           else:
-              simple_view = "    /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.\n    private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))\n"
-              if source.count(simple_view) != 1:
-                  raise SystemExit(f"Expected exactly one old MPVolumeView block, found {source.count(simple_view)}")
+              if source.count(old_view) != 1:
+                  raise SystemExit(f"Expected one old MPVolumeView block, found {source.count(old_view)}")
 
               start = source.find(start_marker)
-              if start < 0:
+              if start == -1:
                   raise SystemExit("setSystemVolume start marker not found")
 
               end = source.find(end_marker, start)
-              if end < 0:
-                  raise SystemExit("playKioskMedia end marker not found")
+              if end == -1:
+                  raise SystemExit("playKioskMedia marker not found")
 
-              source = source.replace(simple_view, new_view, 1)
+              source = source.replace(old_view, new_view, 1)
               source = source[:start] + new_func + source[end:]
               path.write_text(source, encoding="utf-8")
-              print("Robust iOS 26 kiosk volume fix applied.")
+              print("Robust volume fix applied")
           PY
 
           grep -nF 'width: 120, height: 40' "$FILE"
@@ -161,26 +153,13 @@ jobs:
           grep -nF 'applyVolume(0.50)' "$FILE"
           grep -nF 'Kiosk system volume verification:' "$FILE"
 
-      - name: Commit fix and trigger Xcode 27 IPA build
+      - name: Commit patch
         shell: bash
         run: |
           set -euo pipefail
-
-          BUILD_WORKFLOW=".github/workflows/build-native-kiosk-audio-main.yml"
-          SELF=".github/workflows/apply-ios26-volume-fix-once.yml"
-
-          echo '' >> "$BUILD_WORKFLOW"
-          echo '# Trigger rebuild after robust iOS 26 volume fix.' >> "$BUILD_WORKFLOW"
-
-          git rm "$SELF"
-
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          git add Sources/App/Notifications/NotificationManager.swift "$BUILD_WORKFLOW"
-
+          git add Sources/App/Notifications/NotificationManager.swift
           git diff --cached --check
-          git diff --cached --stat
-
           git commit -m 'Restore robust iOS 26 kiosk volume control'
           git push origin HEAD:native-kiosk-audio-main
