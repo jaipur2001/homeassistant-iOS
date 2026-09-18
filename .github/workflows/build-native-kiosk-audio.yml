@@ -1,4 +1,4 @@
-name: Build Native Kiosk Audio IPA
+name: Build Signed Native Kiosk Audio IPA
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   build:
-    name: Build unsigned iOS kiosk app
+    name: Build signed iOS kiosk app
     runs-on: macos-26
     timeout-minutes: 90
 
@@ -352,78 +352,339 @@ jobs:
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
 
       # =====================================================================
-      # Unsigned Kiosk-IPA erstellen
+      # Signierte Kiosk-IPA erstellen
       #
-      # Home Assistant erzeugt aktuell:
+      # Der Xcode-Build bleibt bewusst unsigned. Anschliessend wird das
+      # fertige App-Bundle fuer den Kiosk reduziert und mit unseren eigenen
+      # Development-Profilen signiert.
       #
-      #   Home Assistant Δ.app
-      #   Home Assistant Δ
+      # Behalten:
+      #   - Haupt-App
+      #   - Notification Service Extension (Remote Push)
+      #   - Frameworks / Libraries / Resources
       #
-      # Sideloadly verarbeitet den Unicode-Namen problematisch.
-      #
-      # Deshalb:
-      #
-      #   Home Assistant Δ.app  -> HomeAssistant.app
-      #   Home Assistant Δ      -> HomeAssistant
-      #
-      #
-      # KIOSK-CLEANUP
-      #
-      # Auf diesem iPad benötigen wir ausschließlich die Haupt-App.
-      #
-      # Entfernt werden:
-      #
-      #   - Apple-Watch-App
-      #   - WatchKitSupport2
+      # Entfernen:
+      #   - Watch
       #   - Widgets
-      #   - Intents-/Share-/sonstige App Extensions
-      #   - komplettes PlugIns-Verzeichnis
-      #   - alle verbleibenden *.appex
+      #   - Share / Intents / Matter / PushProvider / sonstige Extensions
       #
-      # NICHT entfernt werden:
+      # Endgueltige IDs:
+      #   App:
+      #     de.weber-schubert.homeassistant.kiosk
       #
-      #   - Frameworks
-      #   - Swift Libraries
-      #   - *.bundle
-      #   - Assets
-      #   - Resources
-      #   - Daten/Komponenten der Haupt-App
+      #   Notification Service:
+      #     de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
       #
-      # Dadurch vermeiden wir insbesondere das bereits beobachtete:
-      #
-      #   HomeAssistant-Extensions-Widgets
-      #   CODESIGNING: Invalid Page
+      #   App Group:
+      #     group.de.weber-schubert.homeassistant.kiosk
       # =====================================================================
 
-      - name: Create unsigned kiosk IPA
+      - name: Create signed kiosk IPA
+        id: sign_ipa
         shell: bash
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MAIN_PROFILE_BASE64: ${{ secrets.IOS_MAIN_PROFILE_BASE64 }}
+          IOS_NOTIFICATION_PROFILE_BASE64: ${{ secrets.IOS_NOTIFICATION_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
 
-          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          MAIN_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk"
+          NOTIFICATION_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk.APNSAttachmentService"
+          APP_GROUP_ID="group.de.weber-schubert.homeassistant.kiosk"
 
+          PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
+
+          APP_PATH="$(
+            find "$PRODUCT_DIR" \
+              -maxdepth 1 \
+              -type d \
+              -name 'Home Assistant*.app' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Home Assistant application bundle not found in $PRODUCT_DIR"
+            exit 1
+          fi
+
+          for required_name in \
+            IOS_CERTIFICATE_P12_BASE64 \
+            IOS_CERTIFICATE_PASSWORD \
+            IOS_MAIN_PROFILE_BASE64 \
+            IOS_NOTIFICATION_PROFILE_BASE64
+          do
+            if [ -z "${!required_name:-}" ]; then
+              echo "::error::GitHub secret $required_name is missing or empty"
+              exit 1
+            fi
+          done
+
+          SIGN_DIR="$PWD/build/signing"
           IPA_DIR="$PWD/build/ipa"
           PAYLOAD_DIR="$IPA_DIR/Payload"
-
           NORMALIZED_APP="$PAYLOAD_DIR/HomeAssistant.app"
-          NORMALIZED_EXECUTABLE="HomeAssistant"
 
-          IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
+          P12_PATH="$SIGN_DIR/HomeAssistant-Kiosk-Development.p12"
+          MAIN_PROFILE="$SIGN_DIR/main.mobileprovision"
+          NOTIFICATION_PROFILE="$SIGN_DIR/notification.mobileprovision"
+          MAIN_PROFILE_PLIST="$SIGN_DIR/main-profile.plist"
+          NOTIFICATION_PROFILE_PLIST="$SIGN_DIR/notification-profile.plist"
+          MAIN_ENTITLEMENTS="$SIGN_DIR/main-entitlements.plist"
+          NOTIFICATION_ENTITLEMENTS="$SIGN_DIR/notification-entitlements.plist"
 
-          echo "Source application bundle:"
-          echo "$APP_PATH"
+          KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+
+          IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
+
+          rm -rf "$SIGN_DIR" "$IPA_DIR"
+          mkdir -p "$SIGN_DIR" "$PAYLOAD_DIR"
+
+          echo "Decoding signing material..."
+
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" \
+            | /usr/bin/base64 -D \
+            > "$P12_PATH"
+
+          printf '%s' "$IOS_MAIN_PROFILE_BASE64" \
+            | /usr/bin/base64 -D \
+            > "$MAIN_PROFILE"
+
+          printf '%s' "$IOS_NOTIFICATION_PROFILE_BASE64" \
+            | /usr/bin/base64 -D \
+            > "$NOTIFICATION_PROFILE"
+
+          if [ ! -s "$P12_PATH" ] || \
+             [ ! -s "$MAIN_PROFILE" ] || \
+             [ ! -s "$NOTIFICATION_PROFILE" ]; then
+            echo "::error::One or more decoded signing files are empty"
+            exit 1
+          fi
+
+          echo "Creating temporary keychain..."
+
+          security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$P12_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$IOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" >/dev/null
+
+          security list-keychains \
+            -d user \
+            -s "$KEYCHAIN_PATH"
 
           echo ""
-          echo "Preparing IPA directory..."
+          echo "Available code-signing identities:"
 
-          rm -rf "$IPA_DIR"
-          mkdir -p "$PAYLOAD_DIR"
+          security find-identity \
+            -v \
+            -p codesigning \
+            "$KEYCHAIN_PATH"
 
-          # ---------------------------------------------------------------
-          # App-Bundle vollständig kopieren
-          #
-          # ditto erhält Rechte, Extended Attributes und Symlinks sauber.
-          # ---------------------------------------------------------------
+          SIGNING_IDENTITY="$(
+            security find-identity \
+              -v \
+              -p codesigning \
+              "$KEYCHAIN_PATH" \
+              | awk '/Apple Development/ {print $2; exit}'
+          )"
+
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "::error::No Apple Development signing identity found in imported P12"
+            exit 1
+          fi
+
+          echo ""
+          echo "Selected signing identity SHA-1:"
+          echo "$SIGNING_IDENTITY"
+
+          echo ""
+          echo "Decoding provisioning profiles..."
+
+          security cms -D -i "$MAIN_PROFILE" > "$MAIN_PROFILE_PLIST"
+          security cms -D -i "$NOTIFICATION_PROFILE" > "$NOTIFICATION_PROFILE_PLIST"
+
+          python3 - \
+            "$MAIN_PROFILE_PLIST" \
+            "$NOTIFICATION_PROFILE_PLIST" \
+            "$MAIN_ENTITLEMENTS" \
+            "$NOTIFICATION_ENTITLEMENTS" \
+            "$SIGNING_IDENTITY" \
+            "$MAIN_BUNDLE_ID" \
+            "$NOTIFICATION_BUNDLE_ID" \
+            "$APP_GROUP_ID" <<'PY'
+          import datetime
+          import hashlib
+          import plistlib
+          import sys
+
+          (
+              main_profile_path,
+              notification_profile_path,
+              main_entitlements_path,
+              notification_entitlements_path,
+              signing_identity,
+              main_bundle_id,
+              notification_bundle_id,
+              app_group_id,
+          ) = sys.argv[1:]
+
+          def load_plist(path):
+              with open(path, "rb") as handle:
+                  return plistlib.load(handle)
+
+          main_profile = load_plist(main_profile_path)
+          notification_profile = load_plist(notification_profile_path)
+
+          def allowed_by_profile(patterns, value):
+              for pattern in patterns:
+                  if pattern == value:
+                      return True
+                  if pattern.endswith("*") and value.startswith(pattern[:-1]):
+                      return True
+              return False
+
+          def validate_profile(profile, expected_bundle_id, require_push):
+              name = profile.get("Name", "<unnamed>")
+              entitlements = profile.get("Entitlements", {})
+              teams = profile.get("TeamIdentifier", [])
+
+              if len(teams) != 1:
+                  raise SystemExit(
+                      f"ERROR: Provisioning profile {name!r} has unexpected TeamIdentifier: {teams!r}"
+                  )
+
+              team_id = teams[0]
+              expected_application_id = f"{team_id}.{expected_bundle_id}"
+              actual_application_id = entitlements.get("application-identifier")
+
+              if actual_application_id != expected_application_id:
+                  raise SystemExit(
+                      "ERROR: Provisioning profile does not match bundle ID.\n"
+                      f"Profile: {name}\n"
+                      f"Expected application-identifier: {expected_application_id}\n"
+                      f"Actual application-identifier:   {actual_application_id}"
+                  )
+
+              expiry = profile.get("ExpirationDate")
+              if expiry is None:
+                  raise SystemExit(f"ERROR: Provisioning profile {name!r} has no ExpirationDate")
+
+              if expiry <= datetime.datetime.utcnow():
+                  raise SystemExit(
+                      f"ERROR: Provisioning profile {name!r} expired at {expiry.isoformat()} UTC"
+                  )
+
+              groups = entitlements.get("com.apple.security.application-groups", [])
+              if app_group_id not in groups:
+                  raise SystemExit(
+                      f"ERROR: Provisioning profile {name!r} does not contain App Group {app_group_id!r}"
+                  )
+
+              if require_push and entitlements.get("aps-environment") != "development":
+                  raise SystemExit(
+                      f"ERROR: Main provisioning profile {name!r} does not contain "
+                      "aps-environment=development"
+                  )
+
+              if entitlements.get("get-task-allow") is not True:
+                  raise SystemExit(
+                      f"ERROR: Provisioning profile {name!r} is not a Development profile "
+                      "(get-task-allow is not true)"
+                  )
+
+              wanted_keychain_group = f"{team_id}.{main_bundle_id}"
+              allowed_keychain_groups = entitlements.get("keychain-access-groups", [])
+
+              if not allowed_by_profile(allowed_keychain_groups, wanted_keychain_group):
+                  raise SystemExit(
+                      f"ERROR: Provisioning profile {name!r} does not authorize shared "
+                      f"keychain group {wanted_keychain_group!r}. "
+                      f"Authorized groups: {allowed_keychain_groups!r}"
+                  )
+
+              cert_fingerprints = {
+                  hashlib.sha1(cert).hexdigest().upper()
+                  for cert in profile.get("DeveloperCertificates", [])
+              }
+
+              if signing_identity.upper() not in cert_fingerprints:
+                  raise SystemExit(
+                      f"ERROR: Imported Apple Development certificate {signing_identity} "
+                      f"is not included in provisioning profile {name!r}"
+                  )
+
+              print(f"Profile OK: {name}")
+              print(f"  Bundle ID: {expected_bundle_id}")
+              print(f"  Team ID:   {team_id}")
+              print(f"  Expires:   {expiry.isoformat()} UTC")
+
+              return team_id, entitlements
+
+          main_team, main_profile_entitlements = validate_profile(
+              main_profile,
+              main_bundle_id,
+              True,
+          )
+
+          notification_team, notification_profile_entitlements = validate_profile(
+              notification_profile,
+              notification_bundle_id,
+              False,
+          )
+
+          if main_team != notification_team:
+              raise SystemExit(
+                  f"ERROR: Team ID mismatch: main={main_team}, notification={notification_team}"
+              )
+
+          shared_keychain_group = f"{main_team}.{main_bundle_id}"
+
+          main_entitlements = {
+              "application-identifier": f"{main_team}.{main_bundle_id}",
+              "com.apple.developer.team-identifier": main_team,
+              "get-task-allow": True,
+              "aps-environment": "development",
+              "com.apple.security.application-groups": [app_group_id],
+              "keychain-access-groups": [shared_keychain_group],
+          }
+
+          notification_entitlements = {
+              "application-identifier": f"{main_team}.{notification_bundle_id}",
+              "com.apple.developer.team-identifier": main_team,
+              "get-task-allow": True,
+              "com.apple.security.application-groups": [app_group_id],
+              "keychain-access-groups": [shared_keychain_group],
+          }
+
+          with open(main_entitlements_path, "wb") as handle:
+              plistlib.dump(main_entitlements, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+
+          with open(notification_entitlements_path, "wb") as handle:
+              plistlib.dump(notification_entitlements, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+
+          print("")
+          print("Generated signing entitlements:")
+          print(f"  Main app:             {main_entitlements_path}")
+          print(f"  Notification service: {notification_entitlements_path}")
+          PY
+
+          echo ""
+          echo "Preparing application payload..."
 
           ditto \
             "$APP_PATH" \
@@ -432,28 +693,15 @@ jobs:
           INFO_PLIST="$NORMALIZED_APP/Info.plist"
 
           if [ ! -f "$INFO_PLIST" ]; then
-            echo "::error::Copied Info.plist not found:"
-            echo "$INFO_PLIST"
+            echo "::error::Copied Info.plist not found"
             exit 1
           fi
-
-          echo ""
-          echo "Copied application size before kiosk cleanup:"
-          du -sh "$NORMALIZED_APP"
-
-          # ---------------------------------------------------------------
-          # Ursprüngliches Executable bestimmen
-          # ---------------------------------------------------------------
 
           ORIGINAL_EXECUTABLE="$(
             /usr/libexec/PlistBuddy \
               -c 'Print :CFBundleExecutable' \
               "$INFO_PLIST"
           )"
-
-          echo ""
-          echo "Original CFBundleExecutable:"
-          echo "$ORIGINAL_EXECUTABLE"
 
           if [ -z "$ORIGINAL_EXECUTABLE" ]; then
             echo "::error::CFBundleExecutable is empty"
@@ -463,169 +711,107 @@ jobs:
           ORIGINAL_EXECUTABLE_PATH="$NORMALIZED_APP/$ORIGINAL_EXECUTABLE"
 
           if [ ! -f "$ORIGINAL_EXECUTABLE_PATH" ]; then
-            echo "::error::Original executable not found:"
-            echo "$ORIGINAL_EXECUTABLE_PATH"
+            echo "::error::Original executable not found: $ORIGINAL_EXECUTABLE_PATH"
             exit 1
           fi
 
-          # ---------------------------------------------------------------
-          # Mach-O vor jeglicher Manipulation prüfen
-          # ---------------------------------------------------------------
-
           echo ""
-          echo "Original executable Mach-O dependencies:"
-          otool -L "$ORIGINAL_EXECUTABLE_PATH"
-
-          echo ""
-          echo "Checking original executable for debug dylib dependency..."
+          echo "Checking main executable before normalization..."
 
           if otool -L "$ORIGINAL_EXECUTABLE_PATH" \
             | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
-
-            echo "::error::Original executable still references a debug dylib:"
-
-            otool -L "$ORIGINAL_EXECUTABLE_PATH" \
-              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
-
+            echo "::error::Original executable still references a debug dylib"
+            otool -L "$ORIGINAL_EXECUTABLE_PATH"
             exit 1
           fi
 
-          echo "No debug dylib dependency found in original executable."
-
-          # ---------------------------------------------------------------
-          # Executable auf ASCII-Namen normalisieren
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Renaming executable:"
-          echo "  $ORIGINAL_EXECUTABLE"
-          echo "  ->"
-          echo "  $NORMALIZED_EXECUTABLE"
-
           mv \
             "$ORIGINAL_EXECUTABLE_PATH" \
-            "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
-
-          # ---------------------------------------------------------------
-          # Info.plist anpassen
-          # ---------------------------------------------------------------
+            "$NORMALIZED_APP/HomeAssistant"
 
           /usr/libexec/PlistBuddy \
-            -c "Set :CFBundleExecutable $NORMALIZED_EXECUTABLE" \
+            -c 'Set :CFBundleExecutable HomeAssistant' \
             "$INFO_PLIST"
 
           /usr/libexec/PlistBuddy \
-            -c "Set :CFBundleName HomeAssistant" \
+            -c 'Set :CFBundleName HomeAssistant' \
             "$INFO_PLIST" || true
 
-          # ---------------------------------------------------------------
-          # KIOSK-CLEANUP
-          # ---------------------------------------------------------------
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleIdentifier $MAIN_BUNDLE_ID" \
+            "$INFO_PLIST"
 
           echo ""
-          echo "============================================================"
-          echo "KIOSK CLEANUP"
-          echo "============================================================"
+          echo "Removing Watch content..."
+
+          rm -rf \
+            "$NORMALIZED_APP/Watch" \
+            "$NORMALIZED_APP/WatchKitSupport2"
 
           echo ""
-          echo "Embedded content before cleanup:"
+          echo "Selecting Notification Service Extension..."
 
-          find "$NORMALIZED_APP" \
-            -mindepth 1 \
-            -maxdepth 8 \
-            \( \
-              -type d -name '*.app' \
-              -o \
-              -type d -name '*.appex' \
-              -o \
-              -type d -name 'Watch' \
-              -o \
-              -type d -name 'WatchKitSupport2' \
-              -o \
-              -type d -name 'PlugIns' \
-            \) \
-            -print || true
+          NOTIFICATION_APPEX=""
 
-          # ---------------------------------------------------------------
-          # Apple Watch entfernen
-          # ---------------------------------------------------------------
-
-          if [ -d "$NORMALIZED_APP/Watch" ]; then
-            echo ""
-            echo "Removing Watch directory:"
-            echo "$NORMALIZED_APP/Watch"
-
-            rm -rf "$NORMALIZED_APP/Watch"
-          else
-            echo ""
-            echo "No Watch directory found."
+          if [ ! -d "$NORMALIZED_APP/PlugIns" ]; then
+            echo "::error::PlugIns directory missing. Notification Service Extension was not embedded."
+            exit 1
           fi
 
-          # ---------------------------------------------------------------
-          # WatchKit-Support entfernen
-          # ---------------------------------------------------------------
+          while IFS= read -r -d '' APPEX
+          do
+            APPEX_INFO="$APPEX/Info.plist"
 
-          if [ -d "$NORMALIZED_APP/WatchKitSupport2" ]; then
-            echo ""
-            echo "Removing WatchKitSupport2:"
-            echo "$NORMALIZED_APP/WatchKitSupport2"
+            if [ ! -f "$APPEX_INFO" ]; then
+              echo "Removing extension without Info.plist:"
+              echo "  $APPEX"
+              rm -rf "$APPEX"
+              continue
+            fi
 
-            rm -rf "$NORMALIZED_APP/WatchKitSupport2"
-          else
-            echo ""
-            echo "No WatchKitSupport2 directory found."
-          fi
+            EXTENSION_POINT="$(
+              /usr/libexec/PlistBuddy \
+                -c 'Print :NSExtension:NSExtensionPointIdentifier' \
+                "$APPEX_INFO" 2>/dev/null || true
+            )"
 
-          # ---------------------------------------------------------------
-          # PlugIns entfernen
-          #
-          # Hier befinden sich regulär:
-          #
-          #   Widgets
-          #   Intents
-          #   Notification Extensions
-          #   Share Extensions
-          #   weitere *.appex
-          #
-          # Für den Kiosk nicht benötigt.
-          # ---------------------------------------------------------------
+            if [ "$EXTENSION_POINT" = "com.apple.usernotifications.service" ]; then
+              if [ -n "$NOTIFICATION_APPEX" ]; then
+                echo "::error::More than one Notification Service Extension found"
+                exit 1
+              fi
 
-          if [ -d "$NORMALIZED_APP/PlugIns" ]; then
-            echo ""
-            echo "Removing complete PlugIns directory:"
+              NOTIFICATION_APPEX="$APPEX"
 
+              echo "Keeping Notification Service Extension:"
+              echo "  $NOTIFICATION_APPEX"
+            else
+              echo "Removing kiosk-unneeded extension:"
+              echo "  $APPEX"
+              echo "  extension point: ${EXTENSION_POINT:-unknown}"
+              rm -rf "$APPEX"
+            fi
+          done < <(
             find "$NORMALIZED_APP/PlugIns" \
-              -maxdepth 4 \
-              -print || true
+              -type d \
+              -name '*.appex' \
+              -prune \
+              -print0
+          )
 
-            rm -rf "$NORMALIZED_APP/PlugIns"
-          else
-            echo ""
-            echo "No PlugIns directory found."
+          if [ -z "$NOTIFICATION_APPEX" ] || [ ! -d "$NOTIFICATION_APPEX" ]; then
+            echo "::error::Notification Service Extension not found"
+            exit 1
           fi
 
-          # ---------------------------------------------------------------
-          # Falls irgendwo außerhalb von PlugIns weitere *.appex liegen,
-          # ebenfalls entfernen.
-          # ---------------------------------------------------------------
+          NOTIFICATION_INFO="$NOTIFICATION_APPEX/Info.plist"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleIdentifier $NOTIFICATION_BUNDLE_ID" \
+            "$NOTIFICATION_INFO"
 
           echo ""
-          echo "Searching for remaining app extensions..."
-
-          find "$NORMALIZED_APP" \
-            -depth \
-            -mindepth 1 \
-            -type d \
-            -name '*.appex' \
-            -print \
-            -exec rm -rf {} \;
-
-          # ---------------------------------------------------------------
-          # Verbleibende eingebettete Watch-Apps entfernen
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Searching for remaining embedded Watch apps..."
+          echo "Removing any remaining nested applications..."
 
           find "$NORMALIZED_APP" \
             -depth \
@@ -635,248 +821,251 @@ jobs:
             -print \
             -exec rm -rf {} \;
 
-          # ---------------------------------------------------------------
-          # Kiosk-Cleanup kontrollieren
-          # ---------------------------------------------------------------
-
           echo ""
-          echo "Verifying kiosk cleanup..."
+          echo "Verifying extension set..."
 
-          REMAINING_APPEX="$(
+          APPEX_COUNT="$(
             find "$NORMALIZED_APP" \
               -type d \
               -name '*.appex' \
               -print \
-              -quit || true
+              | wc -l \
+              | tr -d ' '
           )"
 
-          if [ -n "$REMAINING_APPEX" ]; then
-            echo "::error::Embedded app extension still present:"
-            echo "$REMAINING_APPEX"
+          if [ "$APPEX_COUNT" != "1" ]; then
+            echo "::error::Expected exactly one remaining app extension, found $APPEX_COUNT"
+            find "$NORMALIZED_APP" -type d -name '*.appex' -print || true
             exit 1
           fi
 
-          if [ -d "$NORMALIZED_APP/PlugIns" ]; then
-            echo "::error::PlugIns directory still exists"
-            exit 1
-          fi
-
-          if [ -d "$NORMALIZED_APP/Watch" ]; then
-            echo "::error::Watch directory still exists"
-            exit 1
-          fi
-
-          if [ -d "$NORMALIZED_APP/WatchKitSupport2" ]; then
-            echo "::error::WatchKitSupport2 directory still exists"
-            exit 1
-          fi
-
-          REMAINING_WATCH_APP="$(
-            find "$NORMALIZED_APP" \
-              -mindepth 1 \
-              -type d \
-              -name '*Watch*.app' \
-              -print \
-              -quit || true
-          )"
-
-          if [ -n "$REMAINING_WATCH_APP" ]; then
-            echo "::error::Embedded Watch application still present:"
-            echo "$REMAINING_WATCH_APP"
-            exit 1
-          fi
-
-          echo ""
-          echo "Kiosk cleanup successful:"
-          echo "  Watch:             removed"
-          echo "  WatchKitSupport2:  removed"
-          echo "  PlugIns:           removed"
-          echo "  App extensions:    none"
-
-          echo ""
-          echo "Application size after kiosk cleanup:"
-          du -sh "$NORMALIZED_APP"
-
-          # ---------------------------------------------------------------
-          # Normalisiertes Bundle überprüfen
-          # ---------------------------------------------------------------
-
-          FINAL_EXECUTABLE="$(
+          REMAINING_EXTENSION_POINT="$(
             /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleExecutable' \
-              "$INFO_PLIST"
+              -c 'Print :NSExtension:NSExtensionPointIdentifier' \
+              "$NOTIFICATION_INFO"
           )"
 
-          echo ""
-          echo "Normalized CFBundleExecutable:"
-          echo "$FINAL_EXECUTABLE"
-
-          if [ "$FINAL_EXECUTABLE" != "$NORMALIZED_EXECUTABLE" ]; then
-            echo "::error::CFBundleExecutable normalization failed"
-            exit 1
-          fi
-
-          if [ ! -f "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
-            echo "::error::Normalized executable does not exist:"
-            echo "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
-            exit 1
-          fi
-
-          if [ ! -x "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" ]; then
-            echo "::error::Normalized executable is not executable"
+          if [ "$REMAINING_EXTENSION_POINT" != "com.apple.usernotifications.service" ]; then
+            echo "::error::Remaining extension is not a Notification Service Extension"
             exit 1
           fi
 
           echo ""
-          echo "Normalized executable:"
-          ls -lh "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+          echo "Verifying Firebase configuration in built app..."
 
-          echo ""
-          echo "Executable type:"
-          file "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
+          FIREBASE_PLIST="$NORMALIZED_APP/GoogleService-Info-Debug.plist"
 
-          # ---------------------------------------------------------------
-          # Mach-O nach Umbenennung erneut prüfen
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Normalized executable Mach-O dependencies:"
-          otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE"
-
-          echo ""
-          echo "Checking normalized executable for debug dylib dependency..."
-
-          if otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" \
-            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
-
-            echo "::error::Normalized executable still references a debug dylib:"
-
-            otool -L "$NORMALIZED_APP/$NORMALIZED_EXECUTABLE" \
-              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
-
+          if [ ! -f "$FIREBASE_PLIST" ]; then
+            echo "::error::GoogleService-Info-Debug.plist is missing from app bundle"
             exit 1
           fi
 
-          echo "No debug dylib dependency found in normalized executable."
+          FIREBASE_BUNDLE_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :BUNDLE_ID' \
+              "$FIREBASE_PLIST"
+          )"
 
-          # ---------------------------------------------------------------
-          # Info.plist anzeigen
-          # ---------------------------------------------------------------
+          FIREBASE_PROJECT_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :PROJECT_ID' \
+              "$FIREBASE_PLIST"
+          )"
 
-          echo ""
-          echo "Important Info.plist values:"
+          FIREBASE_GOOGLE_APP_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :GOOGLE_APP_ID' \
+              "$FIREBASE_PLIST"
+          )"
 
-          echo ""
-          echo "CFBundleIdentifier:"
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleIdentifier' \
-            "$INFO_PLIST" || true
-
-          echo ""
-          echo "CFBundleName:"
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleName' \
-            "$INFO_PLIST" || true
-
-          echo ""
-          echo "CFBundleDisplayName:"
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleDisplayName' \
-            "$INFO_PLIST" || true
-
-          echo ""
-          echo "CFBundleExecutable:"
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleExecutable' \
-            "$INFO_PLIST"
-
-          # ---------------------------------------------------------------
-          # Frameworks / Bundles zur Information anzeigen
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Frameworks retained:"
-
-          if [ -d "$NORMALIZED_APP/Frameworks" ]; then
-            find "$NORMALIZED_APP/Frameworks" \
-              -maxdepth 2 \
-              -type d \
-              -name '*.framework' \
-              -print || true
-          else
-            echo "No Frameworks directory."
+          if [ "$FIREBASE_BUNDLE_ID" != "$MAIN_BUNDLE_ID" ]; then
+            echo "::error::Firebase BUNDLE_ID mismatch: $FIREBASE_BUNDLE_ID"
+            exit 1
           fi
 
+          if [ "$FIREBASE_PROJECT_ID" != "homeassistant-kiosk" ]; then
+            echo "::error::Unexpected Firebase PROJECT_ID: $FIREBASE_PROJECT_ID"
+            exit 1
+          fi
+
+          echo "Firebase configuration OK:"
+          echo "  BUNDLE_ID:    $FIREBASE_BUNDLE_ID"
+          echo "  PROJECT_ID:   $FIREBASE_PROJECT_ID"
+          echo "  GOOGLE_APP_ID: $FIREBASE_GOOGLE_APP_ID"
+
           echo ""
-          echo "Resource bundles retained:"
+          echo "Embedding provisioning profiles..."
+
+          cp \
+            "$MAIN_PROFILE" \
+            "$NORMALIZED_APP/embedded.mobileprovision"
+
+          cp \
+            "$NOTIFICATION_PROFILE" \
+            "$NOTIFICATION_APPEX/embedded.mobileprovision"
+
+          echo ""
+          echo "Removing stale signatures..."
 
           find "$NORMALIZED_APP" \
             -type d \
-            -name '*.bundle' \
-            -print || true
-
-          # ---------------------------------------------------------------
-          # IPA erzeugen
-          # ---------------------------------------------------------------
+            -name '_CodeSignature' \
+            -prune \
+            -print \
+            -exec rm -rf {} \;
 
           echo ""
-          echo "Creating IPA..."
+          echo "Signing embedded dylibs..."
+
+          while IFS= read -r -d '' DYLIB
+          do
+            echo "Signing dylib:"
+            echo "  $DYLIB"
+
+            codesign \
+              --force \
+              --sign "$SIGNING_IDENTITY" \
+              --timestamp=none \
+              "$DYLIB"
+          done < <(
+            find "$NORMALIZED_APP" \
+              -type f \
+              -name '*.dylib' \
+              -print0
+          )
+
+          echo ""
+          echo "Signing embedded frameworks..."
+
+          while IFS= read -r -d '' FRAMEWORK
+          do
+            echo "Signing framework:"
+            echo "  $FRAMEWORK"
+
+            codesign \
+              --force \
+              --sign "$SIGNING_IDENTITY" \
+              --timestamp=none \
+              "$FRAMEWORK"
+          done < <(
+            find "$NORMALIZED_APP" \
+              -depth \
+              -type d \
+              -name '*.framework' \
+              -print0
+          )
+
+          echo ""
+          echo "Signing embedded XPC services..."
+
+          while IFS= read -r -d '' XPC
+          do
+            echo "Signing XPC:"
+            echo "  $XPC"
+
+            codesign \
+              --force \
+              --sign "$SIGNING_IDENTITY" \
+              --timestamp=none \
+              "$XPC"
+          done < <(
+            find "$NORMALIZED_APP" \
+              -depth \
+              -type d \
+              -name '*.xpc' \
+              -print0
+          )
+
+          echo ""
+          echo "Signing Notification Service Extension..."
+
+          codesign \
+            --force \
+            --sign "$SIGNING_IDENTITY" \
+            --entitlements "$NOTIFICATION_ENTITLEMENTS" \
+            --timestamp=none \
+            "$NOTIFICATION_APPEX"
+
+          echo ""
+          echo "Signing main application..."
+
+          codesign \
+            --force \
+            --sign "$SIGNING_IDENTITY" \
+            --entitlements "$MAIN_ENTITLEMENTS" \
+            --timestamp=none \
+            "$NORMALIZED_APP"
+
+          echo ""
+          echo "Verifying signatures before packaging..."
+
+          codesign \
+            --verify \
+            --deep \
+            --strict \
+            --verbose=4 \
+            "$NORMALIZED_APP"
+
+          echo ""
+          echo "Signed main-app entitlements:"
+
+          codesign \
+            -d \
+            --entitlements :- \
+            "$NORMALIZED_APP" 2>&1 \
+            | sed -n '/<?xml/,$p' \
+            | head -n 120
+
+          echo ""
+          echo "Signed notification-extension entitlements:"
+
+          codesign \
+            -d \
+            --entitlements :- \
+            "$NOTIFICATION_APPEX" 2>&1 \
+            | sed -n '/<?xml/,$p' \
+            | head -n 120
+
+          echo ""
+          echo "Creating signed IPA..."
 
           cd "$IPA_DIR"
 
           zip -qry \
-            "HomeAssistant-Native-Kiosk-Audio-unsigned.ipa" \
+            "$IPA_PATH" \
             Payload
 
           if [ ! -f "$IPA_PATH" ]; then
-            echo "::error::IPA was not created"
+            echo "::error::Signed IPA was not created"
             exit 1
           fi
 
           echo ""
-          echo "Created IPA:"
+          echo "Created:"
           ls -lh "$IPA_PATH"
 
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+
       # =====================================================================
-      # Fertige IPA vollständig kontrollieren
-      #
-      # Die tatsächlich erzeugte IPA wird wieder entpackt.
-      #
-      # Dadurch prüfen wir exakt das Artefakt, das anschließend an
-      # Sideloadly übergeben wird.
+      # Signierte IPA erneut entpacken und endgueltig pruefen
       # =====================================================================
 
-      - name: Verify unsigned kiosk IPA
+      - name: Verify signed kiosk IPA
         shell: bash
         run: |
           set -euo pipefail
 
-          IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa"
-          VERIFY_DIR="$PWD/build/ipa-verify"
+          MAIN_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk"
+          NOTIFICATION_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk.APNSAttachmentService"
+          APP_GROUP_ID="group.de.weber-schubert.homeassistant.kiosk"
 
-          if [ ! -f "$IPA_PATH" ]; then
-            echo "::error::IPA does not exist:"
-            echo "$IPA_PATH"
-            exit 1
-          fi
+          IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
+          VERIFY_DIR="$PWD/build/ipa-verify"
 
           rm -rf "$VERIFY_DIR"
           mkdir -p "$VERIFY_DIR"
 
-          # ---------------------------------------------------------------
-          # ZIP-Struktur prüfen
-          # ---------------------------------------------------------------
-
-          echo "Testing ZIP integrity..."
-
           unzip -t "$IPA_PATH"
-
-          # ---------------------------------------------------------------
-          # IPA entpacken
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Extracting IPA..."
 
           unzip -q \
             "$IPA_PATH" \
@@ -885,17 +1074,8 @@ jobs:
           APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
           INFO_PLIST="$APP_PATH/Info.plist"
 
-          # ---------------------------------------------------------------
-          # Haupt-App prüfen
-          # ---------------------------------------------------------------
-
-          if [ ! -d "$APP_PATH" ]; then
-            echo "::error::Payload/HomeAssistant.app not found"
-            exit 1
-          fi
-
-          if [ ! -f "$INFO_PLIST" ]; then
-            echo "::error::Info.plist not found in packaged IPA"
+          if [ ! -d "$APP_PATH" ] || [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Packaged HomeAssistant.app is incomplete"
             exit 1
           fi
 
@@ -905,201 +1085,263 @@ jobs:
               "$INFO_PLIST"
           )"
 
-          echo ""
-          echo "Packaged CFBundleExecutable:"
-          echo "$EXECUTABLE"
+          BUNDLE_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleIdentifier' \
+              "$INFO_PLIST"
+          )"
 
           if [ "$EXECUTABLE" != "HomeAssistant" ]; then
-            echo "::error::Unexpected CFBundleExecutable:"
-            echo "$EXECUTABLE"
+            echo "::error::Unexpected CFBundleExecutable: $EXECUTABLE"
             exit 1
           fi
 
-          if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
-            echo "::error::Executable missing from packaged IPA:"
-            echo "$APP_PATH/$EXECUTABLE"
+          if [ "$BUNDLE_ID" != "$MAIN_BUNDLE_ID" ]; then
+            echo "::error::Unexpected main bundle ID: $BUNDLE_ID"
             exit 1
           fi
 
           if [ ! -x "$APP_PATH/$EXECUTABLE" ]; then
-            echo "::error::Packaged executable is not executable"
+            echo "::error::Main executable is missing or not executable"
             exit 1
           fi
-
-          echo ""
-          echo "Packaged application size:"
-          du -sh "$APP_PATH"
-
-          echo ""
-          echo "Packaged executable:"
-          ls -lh "$APP_PATH/$EXECUTABLE"
-
-          echo ""
-          echo "Executable type:"
-          file "$APP_PATH/$EXECUTABLE"
-
-          # ---------------------------------------------------------------
-          # Mach-O-Abhängigkeiten
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Mach-O dependencies:"
-          otool -L "$APP_PATH/$EXECUTABLE"
-
-          echo ""
-          echo "Checking for debug dylib dependency..."
 
           if otool -L "$APP_PATH/$EXECUTABLE" \
             | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
-
-            echo "::error::Main executable still references a debug dylib:"
-
-            otool -L "$APP_PATH/$EXECUTABLE" \
-              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
-
+            echo "::error::Packaged executable references a debug dylib"
             exit 1
           fi
 
-          echo "No debug dylib dependency found."
-
-          # ---------------------------------------------------------------
-          # Bundle Identifier
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Bundle identifier:"
-
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleIdentifier' \
-            "$INFO_PLIST"
-
-          # ---------------------------------------------------------------
-          # Kiosk-Struktur verifizieren
-          # ---------------------------------------------------------------
-
-          echo ""
-          echo "Checking kiosk structure..."
-
-          if [ -d "$APP_PATH/Watch" ]; then
-            echo "::error::Watch directory still present"
+          if [ -d "$APP_PATH/Watch" ] || [ -d "$APP_PATH/WatchKitSupport2" ]; then
+            echo "::error::Watch content is still present"
             exit 1
           fi
 
-          if [ -d "$APP_PATH/WatchKitSupport2" ]; then
-            echo "::error::WatchKitSupport2 directory still present"
-            exit 1
-          fi
-
-          if [ -d "$APP_PATH/PlugIns" ]; then
-            echo "::error::PlugIns directory still present"
-            exit 1
-          fi
-
-          REMAINING_APPEX="$(
+          APPEX_COUNT="$(
             find "$APP_PATH" \
               -type d \
               -name '*.appex' \
               -print \
-              -quit || true
+              | wc -l \
+              | tr -d ' '
           )"
 
-          if [ -n "$REMAINING_APPEX" ]; then
-            echo "::error::Embedded app extension still present:"
-            echo "$REMAINING_APPEX"
+          if [ "$APPEX_COUNT" != "1" ]; then
+            echo "::error::Expected one app extension, found $APPEX_COUNT"
+            find "$APP_PATH" -type d -name '*.appex' -print || true
             exit 1
           fi
 
-          REMAINING_WATCH_APP="$(
+          NOTIFICATION_APPEX="$(
             find "$APP_PATH" \
-              -mindepth 1 \
               -type d \
-              -name '*Watch*.app' \
+              -name '*.appex' \
               -print \
-              -quit || true
+              -quit
           )"
 
-          if [ -n "$REMAINING_WATCH_APP" ]; then
-            echo "::error::Embedded Watch application still present:"
-            echo "$REMAINING_WATCH_APP"
+          NOTIFICATION_INFO="$NOTIFICATION_APPEX/Info.plist"
+
+          EXTENSION_POINT="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :NSExtension:NSExtensionPointIdentifier' \
+              "$NOTIFICATION_INFO"
+          )"
+
+          EXTENSION_BUNDLE_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleIdentifier' \
+              "$NOTIFICATION_INFO"
+          )"
+
+          if [ "$EXTENSION_POINT" != "com.apple.usernotifications.service" ]; then
+            echo "::error::Remaining extension is not the Notification Service Extension"
+            exit 1
+          fi
+
+          if [ "$EXTENSION_BUNDLE_ID" != "$NOTIFICATION_BUNDLE_ID" ]; then
+            echo "::error::Unexpected notification extension bundle ID: $EXTENSION_BUNDLE_ID"
+            exit 1
+          fi
+
+          if [ ! -f "$APP_PATH/embedded.mobileprovision" ]; then
+            echo "::error::Main embedded.mobileprovision missing"
+            exit 1
+          fi
+
+          if [ ! -f "$NOTIFICATION_APPEX/embedded.mobileprovision" ]; then
+            echo "::error::Notification embedded.mobileprovision missing"
+            exit 1
+          fi
+
+          FIREBASE_PLIST="$APP_PATH/GoogleService-Info-Debug.plist"
+
+          if [ ! -f "$FIREBASE_PLIST" ]; then
+            echo "::error::Firebase plist missing"
+            exit 1
+          fi
+
+          FIREBASE_BUNDLE_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :BUNDLE_ID' \
+              "$FIREBASE_PLIST"
+          )"
+
+          FIREBASE_PROJECT_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :PROJECT_ID' \
+              "$FIREBASE_PLIST"
+          )"
+
+          if [ "$FIREBASE_BUNDLE_ID" != "$MAIN_BUNDLE_ID" ] || \
+             [ "$FIREBASE_PROJECT_ID" != "homeassistant-kiosk" ]; then
+            echo "::error::Packaged Firebase configuration is incorrect"
             exit 1
           fi
 
           echo ""
-          echo "Kiosk payload structure verified:"
-          echo "  Watch:             none"
-          echo "  WatchKitSupport2:  none"
-          echo "  PlugIns:           none"
-          echo "  App extensions:    none"
+          echo "Verifying packaged code signature..."
 
-          # ---------------------------------------------------------------
-          # Sicherstellen, dass zentrale Ressourcen der Haupt-App weiterhin
-          # vorhanden sind.
-          # ---------------------------------------------------------------
+          codesign \
+            --verify \
+            --deep \
+            --strict \
+            --verbose=4 \
+            "$APP_PATH"
 
-          echo ""
-          echo "Retained application content:"
+          MAIN_SIGNED_ENTITLEMENTS="$VERIFY_DIR/main-signed-entitlements.plist"
+          NOTIFICATION_SIGNED_ENTITLEMENTS="$VERIFY_DIR/notification-signed-entitlements.plist"
 
-          find "$APP_PATH" \
-            -mindepth 1 \
-            -maxdepth 2 \
-            -type d \
-            -print \
-            | sort
+          codesign \
+            -d \
+            --entitlements :- \
+            "$APP_PATH" \
+            > "$MAIN_SIGNED_ENTITLEMENTS" 2>/dev/null
 
-          echo ""
-          echo "Framework count:"
+          codesign \
+            -d \
+            --entitlements :- \
+            "$NOTIFICATION_APPEX" \
+            > "$NOTIFICATION_SIGNED_ENTITLEMENTS" 2>/dev/null
 
-          if [ -d "$APP_PATH/Frameworks" ]; then
-            find "$APP_PATH/Frameworks" \
-              -type d \
-              -name '*.framework' \
-              | wc -l
-          else
-            echo "0"
-          fi
+          python3 - \
+            "$MAIN_SIGNED_ENTITLEMENTS" \
+            "$NOTIFICATION_SIGNED_ENTITLEMENTS" \
+            "$MAIN_BUNDLE_ID" \
+            "$NOTIFICATION_BUNDLE_ID" \
+            "$APP_GROUP_ID" <<'PY'
+          import plistlib
+          import sys
 
-          echo ""
-          echo "Resource bundle count:"
+          (
+              main_path,
+              notification_path,
+              main_bundle_id,
+              notification_bundle_id,
+              app_group_id,
+          ) = sys.argv[1:]
 
-          find "$APP_PATH" \
-            -type d \
-            -name '*.bundle' \
-            | wc -l
+          with open(main_path, "rb") as handle:
+              main = plistlib.load(handle)
 
-          # ---------------------------------------------------------------
-          # Abschluss
-          # ---------------------------------------------------------------
+          with open(notification_path, "rb") as handle:
+              notification = plistlib.load(handle)
+
+          main_application_id = main.get("application-identifier", "")
+          notification_application_id = notification.get("application-identifier", "")
+
+          if not main_application_id.endswith("." + main_bundle_id):
+              raise SystemExit(
+                  f"ERROR: Main application-identifier is wrong: {main_application_id}"
+              )
+
+          if not notification_application_id.endswith("." + notification_bundle_id):
+              raise SystemExit(
+                  "ERROR: Notification application-identifier is wrong: "
+                  f"{notification_application_id}"
+              )
+
+          if main.get("aps-environment") != "development":
+              raise SystemExit(
+                  f"ERROR: aps-environment is not development: {main.get('aps-environment')!r}"
+              )
+
+          if app_group_id not in main.get("com.apple.security.application-groups", []):
+              raise SystemExit("ERROR: Main app group entitlement is missing")
+
+          if app_group_id not in notification.get("com.apple.security.application-groups", []):
+              raise SystemExit("ERROR: Notification extension app group entitlement is missing")
+
+          main_keychain = main.get("keychain-access-groups", [])
+          notification_keychain = notification.get("keychain-access-groups", [])
+
+          if main_keychain != notification_keychain or len(main_keychain) != 1:
+              raise SystemExit(
+                  "ERROR: Main app and Notification Service do not use the same keychain group"
+              )
+
+          print("Signed entitlements verified:")
+          print(f"  Main application-identifier: {main_application_id}")
+          print(f"  Extension application-identifier: {notification_application_id}")
+          print(f"  APNs environment: {main['aps-environment']}")
+          print(f"  App Group: {app_group_id}")
+          print(f"  Shared Keychain Group: {main_keychain[0]}")
+          PY
 
           echo ""
           echo "============================================================"
-          echo "KIOSK IPA VERIFICATION SUCCESSFUL"
+          echo "SIGNED KIOSK IPA VERIFICATION SUCCESSFUL"
           echo "============================================================"
           echo ""
-          echo "CFBundleExecutable:"
-          echo "$EXECUTABLE"
+          echo "Main bundle:"
+          echo "  $MAIN_BUNDLE_ID"
           echo ""
-          echo "Checks:"
-          echo "  [OK] Main executable exists"
-          echo "  [OK] Main executable is executable"
-          echo "  [OK] No *.debug.dylib dependency"
-          echo "  [OK] No Watch app"
-          echo "  [OK] No WatchKitSupport2"
-          echo "  [OK] No PlugIns directory"
-          echo "  [OK] No *.appex extensions"
+          echo "Notification Service:"
+          echo "  $NOTIFICATION_BUNDLE_ID"
           echo ""
-          echo "IPA is ready for external signing."
+          echo "Firebase project:"
+          echo "  homeassistant-kiosk"
+          echo ""
+          echo "APNs:"
+          echo "  development"
+          echo ""
+          echo "App Group:"
+          echo "  $APP_GROUP_ID"
+          echo ""
+          echo "The IPA is signed and ready for installation on a device"
+          echo "included in the Development provisioning profiles."
 
       # =====================================================================
-      # IPA als GitHub Artifact bereitstellen
+      # Signierte IPA als GitHub Artifact bereitstellen
       # =====================================================================
 
-      - name: Upload IPA
+      - name: Upload signed IPA
         uses: actions/upload-artifact@v4
         with:
-          name: HomeAssistant-Native-Kiosk-Audio-unsigned
-          path: build/ipa/HomeAssistant-Native-Kiosk-Audio-unsigned.ipa
+          name: HomeAssistant-Native-Kiosk-Audio-signed
+          path: build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa
           if-no-files-found: error
           retention-days: 7
+
+      # =====================================================================
+      # Temporaeres Signing-Material entfernen
+      # =====================================================================
+
+      - name: Cleanup signing material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-signing.keychain-db"
+
+          security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+
+          rm -rf \
+            "$PWD/build/signing" \
+            "$PWD/build/ipa-verify"
+
+          echo "Temporary signing material removed."
 
       # =====================================================================
       # Xcode-Buildlog immer bereitstellen
