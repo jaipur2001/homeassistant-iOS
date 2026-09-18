@@ -288,6 +288,13 @@ jobs:
                   for cert in profile.get("DeveloperCertificates", [])
               ]
 
+          def entitlement_pattern_allows(pattern, value):
+              if pattern == value:
+                  return True
+              if isinstance(pattern, str) and pattern.endswith("*"):
+                  return value.startswith(pattern[:-1])
+              return False
+
           def validate(profile, bundle_id, require_push):
               name = profile.get("Name", "<unnamed>")
               team = (profile.get("TeamIdentifier") or [None])[0]
@@ -310,8 +317,17 @@ jobs:
 
               keychain = ent.get("keychain-access-groups", [])
               expected_keychain = f"{expected_team}.{main_id}"
-              if expected_keychain not in keychain:
-                  raise SystemExit(f"ERROR: {name}: missing keychain group {expected_keychain}")
+
+              if not any(
+                  entitlement_pattern_allows(pattern, expected_keychain)
+                  for pattern in keychain
+              ):
+                  raise SystemExit(
+                      f"ERROR: {name}: keychain group {expected_keychain!r} "
+                      f"is not authorized by profile groups {keychain!r}"
+                  )
+
+              print(f"  keychain authorization: {keychain!r} -> {expected_keychain!r}")
 
               if require_push and ent.get("aps-environment") != "development":
                   raise SystemExit(f"ERROR: {name}: aps-environment is not development")
