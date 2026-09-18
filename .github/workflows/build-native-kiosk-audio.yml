@@ -864,43 +864,44 @@ jobs:
       # Both variants originate from the exact same archive/signing material.
       # -------------------------------------------------------------------
 
-      - name: Preserve signed Xcode archive
+      - name: Preserve reusable signed HomeAssistant app
         shell: bash
         run: |
           set -euo pipefail
 
-          ARCHIVE_PATH="$PWD/build/HomeAssistant-Kiosk.xcarchive"
-          ARCHIVE_TARBALL="$PWD/build/HomeAssistant-Kiosk.xcarchive.tar.gz"
+          SIGNED_APP_TARBALL="$PWD/build/HomeAssistant-signed.app.tar.gz"
 
-          [ -d "$ARCHIVE_PATH" ] || {
-            echo "::error::Signed Xcode archive not found: $ARCHIVE_PATH"
+          [ -d "$APP_PATH" ] || {
+            echo "::error::Signed HomeAssistant.app not found: $APP_PATH"
             exit 1
           }
 
-          rm -f "$ARCHIVE_TARBALL"
+          rm -f "$SIGNED_APP_TARBALL"
 
-          # Store the xcarchive in tar.gz so executable bits and symlinks are
-          # preserved across GitHub Actions artifact upload/download.
-          tar -czf "$ARCHIVE_TARBALL" -C "$PWD/build" "HomeAssistant-Kiosk.xcarchive"
+          # Downstream packaging only needs the already signed .app, not the
+          # complete xcarchive. tar.gz preserves executable bits and symlinks.
+          tar -czf "$SIGNED_APP_TARBALL" \
+            -C "$(dirname "$APP_PATH")" \
+            "$(basename "$APP_PATH")"
 
-          [ -s "$ARCHIVE_TARBALL" ] || {
-            echo "::error::Archive tarball was not created"
+          [ -s "$SIGNED_APP_TARBALL" ] || {
+            echo "::error::Signed app tarball was not created"
             exit 1
           }
 
-          echo "Signed archive artifact:"
-          ls -lh "$ARCHIVE_TARBALL"
-          shasum -a 256 "$ARCHIVE_TARBALL"
+          echo "Reusable signed app artifact:"
+          ls -lh "$SIGNED_APP_TARBALL"
+          shasum -a 256 "$SIGNED_APP_TARBALL"
 
-          echo "ARCHIVE_TARBALL=$ARCHIVE_TARBALL" >> "$GITHUB_ENV"
+          echo "SIGNED_APP_TARBALL=$SIGNED_APP_TARBALL" >> "$GITHUB_ENV"
 
-      - name: Upload reusable signed Xcode archive
+      - name: Upload reusable signed HomeAssistant app
         uses: actions/upload-artifact@v4
         with:
-          name: HomeAssistant-Native-Kiosk-Audio-xcarchive
-          path: build/HomeAssistant-Kiosk.xcarchive.tar.gz
+          name: HomeAssistant-Native-Kiosk-Audio-signed-app
+          path: build/HomeAssistant-signed.app.tar.gz
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
           overwrite: true
 
       - name: Upload archive build log
@@ -982,39 +983,38 @@ jobs:
           echo "  mode:   $SOURCE_MODE"
           echo "  run ID: $SOURCE_RUN_ID"
 
-      - name: Download signed Xcode archive
+      - name: Download reusable signed HomeAssistant app
         uses: actions/download-artifact@v4
         with:
-          name: HomeAssistant-Native-Kiosk-Audio-xcarchive
-          path: build/archive-download
+          name: HomeAssistant-Native-Kiosk-Audio-signed-app
+          path: build/signed-app-download
           github-token: ${{ github.token }}
           run-id: ${{ steps.archive_source.outputs.run_id }}
 
-      - name: Restore signed Xcode archive
+      - name: Restore signed HomeAssistant app
         shell: bash
         run: |
           set -euo pipefail
 
-          ARCHIVE_TARBALL="$PWD/build/archive-download/HomeAssistant-Kiosk.xcarchive.tar.gz"
+          SIGNED_APP_TARBALL="$PWD/build/signed-app-download/HomeAssistant-signed.app.tar.gz"
           RESTORE_DIR="$PWD/build/restored"
 
-          [ -s "$ARCHIVE_TARBALL" ] || {
-            echo "::error::Downloaded archive tarball is missing"
-            find "$PWD/build/archive-download" -maxdepth 2 -print || true
+          [ -s "$SIGNED_APP_TARBALL" ] || {
+            echo "::error::Downloaded signed app tarball is missing"
+            find "$PWD/build/signed-app-download" -maxdepth 2 -print || true
             exit 1
           }
 
           rm -rf "$RESTORE_DIR"
           mkdir -p "$RESTORE_DIR"
 
-          tar -xzf "$ARCHIVE_TARBALL" -C "$RESTORE_DIR"
+          tar -xzf "$SIGNED_APP_TARBALL" -C "$RESTORE_DIR"
 
-          ARCHIVE_PATH="$RESTORE_DIR/HomeAssistant-Kiosk.xcarchive"
-          APP_PATH="$ARCHIVE_PATH/Products/Applications/HomeAssistant.app"
+          APP_PATH="$RESTORE_DIR/HomeAssistant.app"
 
           [ -d "$APP_PATH" ] || {
-            echo "::error::HomeAssistant.app not found in restored archive"
-            find "$RESTORE_DIR" -maxdepth 5 -print || true
+            echo "::error::HomeAssistant.app not found after restore"
+            find "$RESTORE_DIR" -maxdepth 3 -print || true
             exit 1
           }
 
@@ -1024,13 +1024,12 @@ jobs:
             exit 1
           }
 
-          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
-          echo "Restored signed archive:"
-          echo "  $ARCHIVE_PATH"
+          echo "Restored reusable signed app:"
+          echo "  $APP_PATH"
           echo "Source tarball SHA-256:"
-          shasum -a 256 "$ARCHIVE_TARBALL"
+          shasum -a 256 "$SIGNED_APP_TARBALL"
 
       - name: Install packaging signing certificate
         shell: bash
@@ -1112,7 +1111,7 @@ jobs:
           echo "Packaging signing identity:"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
-      - name: Validate restored archive
+      - name: Validate restored signed app
         shell: bash
         run: |
           set -euo pipefail
@@ -1182,11 +1181,11 @@ jobs:
           failed = [name for ok, name in checks if not ok]
           if failed:
               raise SystemExit(
-                  "ERROR: Restored archive entitlement validation failed: "
+                  "ERROR: Restored signed app entitlement validation failed: "
                   + ", ".join(failed)
               )
 
-          print("Restored archive entitlements: OK")
+          print("Restored signed app entitlements: OK")
           PY
 
       - name: Re-sign outer HomeAssistant app and package IPA
