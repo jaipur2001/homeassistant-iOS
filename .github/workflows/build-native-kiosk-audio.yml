@@ -1,13 +1,21 @@
-name: Build Xcode-Signed Native Kiosk Audio A/B IPAs
+name: Build Xcode-Signed Native Kiosk Audio IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      archive_run_id:
+        description: "Optional: successful workflow run ID whose signed Xcode archive should be reused. Leave empty to run Xcode again."
+        required: false
+        type: string
   push:
     branches:
       - native-kiosk-audio
+    paths-ignore:
+      - ".github/workflows/build-native-kiosk-audio.yml"
 
 permissions:
   contents: read
+  actions: read
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
@@ -17,8 +25,9 @@ env:
   TEAM_ID: QKSPJURFCD
 
 jobs:
-  build:
-    name: Build, archive and sign with Xcode
+  archive:
+    name: Archive signed kiosk app with Xcode
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.archive_run_id == '' }}
     runs-on: macos-26
     timeout-minutes: 90
 
@@ -854,1013 +863,54 @@ jobs:
       #
       # Both variants originate from the exact same archive/signing material.
       # -------------------------------------------------------------------
-      - name: Package archive-direct IPA
+
+      - name: Preserve signed Xcode archive
         shell: bash
         run: |
           set -euo pipefail
 
-          DIRECT_STAGE="$PWD/build/archive-direct"
-          DIRECT_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct.ipa"
+          ARCHIVE_PATH="$PWD/build/HomeAssistant-Kiosk.xcarchive"
+          ARCHIVE_TARBALL="$PWD/build/HomeAssistant-Kiosk.xcarchive.tar.gz"
 
-          rm -rf "$DIRECT_STAGE"
-          mkdir -p "$DIRECT_STAGE/Payload" "$PWD/build/ipa"
-
-          # Preserve the signed bundle exactly as archived. No re-signing and
-          # no plist mutation happens here.
-          /usr/bin/ditto "$APP_PATH" "$DIRECT_STAGE/Payload/HomeAssistant.app"
-
-          (
-            cd "$DIRECT_STAGE"
-            /usr/bin/ditto -c -k --keepParent Payload "$DIRECT_IPA"
-          )
-
-          [ -s "$DIRECT_IPA" ] || {
-            echo "::error::Archive-direct IPA was not created"
+          [ -d "$ARCHIVE_PATH" ] || {
+            echo "::error::Signed Xcode archive not found: $ARCHIVE_PATH"
             exit 1
           }
 
-          echo "ARCHIVE_DIRECT_IPA=$DIRECT_IPA" >> "$GITHUB_ENV"
+          rm -f "$ARCHIVE_TARBALL"
 
-          echo "Archive-direct IPA:"
-          ls -lh "$DIRECT_IPA"
-          shasum -a 256 "$DIRECT_IPA"
+          # Store the xcarchive in tar.gz so executable bits and symlinks are
+          # preserved across GitHub Actions artifact upload/download.
+          tar -czf "$ARCHIVE_TARBALL" -C "$PWD/build" "HomeAssistant-Kiosk.xcarchive"
 
-      - name: Export development IPA with Xcode
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          EXPORT_OPTIONS="$PWD/build/ExportOptions.plist"
-          EXPORT_DIR="$PWD/build/export"
-          XCODE_EXPORT_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export.ipa"
-
-          cat > "$EXPORT_OPTIONS" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>destination</key>
-              <string>export</string>
-              <key>method</key>
-              <string>debugging</string>
-              <key>signingStyle</key>
-              <string>manual</string>
-              <key>signingCertificate</key>
-              <string>Apple Development</string>
-              <key>teamID</key>
-              <string>$TEAM_ID</string>
-              <key>provisioningProfiles</key>
-              <dict>
-                  <key>$MAIN_BUNDLE_ID</key>
-                  <string>$MAIN_PROFILE_NAME</string>
-                  <key>$NOTIFICATION_BUNDLE_ID</key>
-                  <string>$NSE_PROFILE_NAME</string>
-              </dict>
-              <key>manageAppVersionAndBuildNumber</key>
-              <false/>
-              <key>stripSwiftSymbols</key>
-              <false/>
-          </dict>
-          </plist>
-          EOF
-
-          rm -rf "$EXPORT_DIR"
-
-          xcodebuild \
-            -exportArchive \
-            -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive" \
-            -exportPath "$EXPORT_DIR" \
-            -exportOptionsPlist "$EXPORT_OPTIONS" \
-            | tee "$PWD/build/xcodebuild-export.log"
-
-          IPA_SOURCE="$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
-
-          if [ -z "$IPA_SOURCE" ] || [ ! -s "$IPA_SOURCE" ]; then
-            echo "::error::Xcode did not export an IPA"
-            find "$EXPORT_DIR" -maxdepth 2 -print || true
-            exit 1
-          fi
-
-          cp "$IPA_SOURCE" "$XCODE_EXPORT_IPA"
-
-          echo "XCODE_EXPORT_IPA=$XCODE_EXPORT_IPA" >> "$GITHUB_ENV"
-
-          echo "Xcode-export IPA:"
-          ls -lh "$XCODE_EXPORT_IPA"
-          shasum -a 256 "$XCODE_EXPORT_IPA"
-
-      - name: Verify both A/B IPAs and write comparison
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          verify_variant() {
-            local label="$1"
-            local ipa="$2"
-            local verify_dir="$3"
-            local info_file="$4"
-            local pipeline="$5"
-
-            rm -rf "$verify_dir"
-            mkdir -p "$verify_dir"
-
-            /usr/bin/ditto -x -k "$ipa" "$verify_dir"
-
-            local app
-            app="$(find "$verify_dir/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
-
-            [ -n "$app" ] && [ -d "$app" ] || {
-              echo "::error::$label: no .app in IPA"
-              exit 1
-            }
-
-            local main_id executable display_name app_basename
-            main_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
-            executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")"
-            display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Info.plist")"
-            app_basename="$(basename "$app")"
-
-            [ "$main_id" = "$MAIN_BUNDLE_ID" ] || {
-              echo "::error::$label: unexpected main bundle ID: $main_id"
-              exit 1
-            }
-
-            [ "$app_basename" = "HomeAssistant.app" ] || {
-              echo "::error::$label: unexpected app bundle name: $app_basename"
-              exit 1
-            }
-
-            [ "$executable" = "HomeAssistant" ] || {
-              echo "::error::$label: unexpected CFBundleExecutable: $executable"
-              exit 1
-            }
-
-            [ -f "$app/$executable" ] && [ -x "$app/$executable" ] || {
-              echo "::error::$label: bundle executable missing or not executable"
-              exit 1
-            }
-
-            local appex_count nse nse_id
-            appex_count="$(
-              find "$app/PlugIns" \
-                -maxdepth 1 \
-                -type d \
-                -name '*.appex' \
-                -print 2>/dev/null \
-                | wc -l \
-                | tr -d ' '
-            )"
-
-            [ "$appex_count" -eq 1 ] || {
-              echo "::error::$label: expected exactly one extension, found $appex_count"
-              find "$app/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true
-              exit 1
-            }
-
-            nse="$(
-              find "$app/PlugIns" \
-                -maxdepth 1 \
-                -type d \
-                -name '*.appex' \
-                -print \
-                -quit
-            )"
-
-            nse_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$nse/Info.plist")"
-            [ "$nse_id" = "$NOTIFICATION_BUNDLE_ID" ] || {
-              echo "::error::$label: unexpected NSE bundle ID: $nse_id"
-              exit 1
-            }
-
-            python3 - "$ipa" "$label" <<'PY'
-          import sys
-          import zipfile
-
-          ipa, label = sys.argv[1:3]
-          expected_prefix = "Payload/HomeAssistant.app/"
-          expected_executable = expected_prefix + "HomeAssistant"
-
-          with zipfile.ZipFile(ipa) as archive:
-              infos = archive.infolist()
-              names = [item.filename for item in infos]
-
-          duplicates = sorted({
-              name for name in names
-              if names.count(name) > 1
-          })
-
-          if duplicates:
-              raise SystemExit(
-                  f"ERROR: {label}: duplicate ZIP entries: {duplicates[:20]!r}"
-              )
-
-          if expected_executable not in names:
-              candidates = [
-                  name for name in names
-                  if name.startswith("Payload/") and name.count("/") <= 2
-              ]
-              raise SystemExit(
-                  f"ERROR: {label}: ZIP reader cannot see expected executable "
-                  f"{expected_executable!r}. Candidates: {candidates!r}"
-              )
-
-          non_ascii_bundle_entries = [
-              name for name in names
-              if name.startswith("Payload/")
-              and len(name.split("/", 2)) > 1
-              and any(ord(ch) > 127 for ch in name.split("/", 2)[1])
-          ]
-
-          if non_ascii_bundle_entries:
-              raise SystemExit(
-                  f"ERROR: {label}: non-ASCII app bundle path: "
-                  f"{non_ascii_bundle_entries[:5]!r}"
-              )
-
-          print(f"{label}: ZIP structure validation: OK")
-          print(f"  entries: {len(names)}")
-          print(f"  executable: {expected_executable}")
-          PY
-
-            echo ""
-            echo "=== $label: codesign verification ==="
-            codesign --verify --deep --strict --verbose=4 "$app"
-
-            local main_profile nse_profile main_ent nse_ent
-            main_profile="$verify_dir/main-profile.plist"
-            nse_profile="$verify_dir/nse-profile.plist"
-            main_ent="$verify_dir/main-entitlements.plist"
-            nse_ent="$verify_dir/nse-entitlements.plist"
-
-            security cms -D -i "$app/embedded.mobileprovision" > "$main_profile"
-            security cms -D -i "$nse/embedded.mobileprovision" > "$nse_profile"
-            codesign -d --entitlements :- "$app" > "$main_ent" 2>/dev/null
-            codesign -d --entitlements :- "$nse" > "$nse_ent" 2>/dev/null
-
-            local info_sha executable_sha code_resources_sha
-            info_sha="$(shasum -a 256 "$app/Info.plist" | awk '{print $1}')"
-            executable_sha="$(shasum -a 256 "$app/$executable" | awk '{print $1}')"
-            code_resources_sha="$(shasum -a 256 "$app/_CodeSignature/CodeResources" | awk '{print $1}')"
-
-            python3 - \
-              "$app/Info.plist" \
-              "$app/GoogleService-Info-Debug.plist" \
-              "$main_profile" \
-              "$nse_profile" \
-              "$main_ent" \
-              "$nse_ent" \
-              "$info_file" \
-              "$GITHUB_STEP_SUMMARY" \
-              "$SIGNING_CERT_SHA1" \
-              "$GITHUB_SHA" \
-              "$GITHUB_REF_NAME" \
-              "$GITHUB_RUN_ID" \
-              "$GITHUB_RUN_ATTEMPT" \
-              "$label" \
-              "$pipeline" \
-              "$info_sha" \
-              "$executable_sha" \
-              "$code_resources_sha" <<'PY'
-          import datetime
-          import plistlib
-          import sys
-
-          (
-              info_path, firebase_path, main_profile_path, nse_profile_path,
-              main_ent_path, nse_ent_path, build_info_path, summary_path,
-              cert_sha, git_sha, branch, run_id, run_attempt, label, pipeline,
-              info_sha, executable_sha, code_resources_sha
-          ) = sys.argv[1:]
-
-          def load(path):
-              with open(path, "rb") as f:
-                  return plistlib.load(f)
-
-          def fmt_date(value):
-              if value is None:
-                  return "<missing>"
-              if value.tzinfo is None:
-                  value = value.replace(tzinfo=datetime.timezone.utc)
-              return value.astimezone(datetime.timezone.utc).strftime(
-                  "%Y-%m-%d %H:%M:%S UTC"
-              )
-
-          info = load(info_path)
-          firebase = load(firebase_path)
-          main_profile = load(main_profile_path)
-          nse_profile = load(nse_profile_path)
-          main_ent = load(main_ent_path)
-
-          data = {
-              "Variant": label,
-              "Git branch": branch,
-              "Git commit": git_sha,
-              "GitHub run": f"{run_id} attempt {run_attempt}",
-              "App version": (
-                  f"{info.get('CFBundleShortVersionString', '<missing>')} "
-                  f"({info.get('CFBundleVersion', '<missing>')})"
-              ),
-              "Main bundle ID": info.get("CFBundleIdentifier", "<missing>"),
-              "Firebase project": firebase.get("PROJECT_ID", "<missing>"),
-              "Firebase app ID": firebase.get("GOOGLE_APP_ID", "<missing>"),
-              "Apple Team ID": main_ent.get(
-                  "com.apple.developer.team-identifier", "<missing>"
-              ),
-              "Signing certificate SHA-1": cert_sha,
-              "APNs environment": main_ent.get("aps-environment", "<missing>"),
-              "App Group": ", ".join(
-                  main_ent.get("com.apple.security.application-groups", [])
-              ),
-              "Keychain Group": ", ".join(
-                  main_ent.get("keychain-access-groups", [])
-              ),
-              "Main profile": main_profile.get("Name", "<missing>"),
-              "Main profile UUID": main_profile.get("UUID", "<missing>"),
-              "Main profile expires": fmt_date(
-                  main_profile.get("ExpirationDate")
-              ),
-              "Notification profile": nse_profile.get("Name", "<missing>"),
-              "Notification profile UUID": nse_profile.get("UUID", "<missing>"),
-              "Notification profile expires": fmt_date(
-                  nse_profile.get("ExpirationDate")
-              ),
-              "Info.plist SHA-256": info_sha,
-              "Executable SHA-256": executable_sha,
-              "CodeResources SHA-256": code_resources_sha,
-              "Signing pipeline": pipeline,
-              "Verification": "SUCCESS",
-          }
-
-          with open(build_info_path, "w", encoding="utf-8") as f:
-              f.write("HomeAssistant Native Kiosk Audio - Build Information\n")
-              f.write("===================================================\n\n")
-              for key, value in data.items():
-                  f.write(f"{key + ':':30} {value}\n")
-
-          with open(summary_path, "a", encoding="utf-8") as f:
-              f.write(f"## {label}\n\n")
-              f.write("| Check | Value |\n|---|---|\n")
-              for key, value in data.items():
-                  f.write(f"| **{key}** | \`{value}\` |\n")
-              f.write("\n")
-
-          print(open(build_info_path, encoding="utf-8").read())
-          PY
-          }
-
-          DIRECT_VERIFY="$PWD/build/verify-archive-direct"
-          EXPORT_VERIFY="$PWD/build/verify-xcode-export"
-
-          DIRECT_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct-BUILD-INFO.txt"
-          EXPORT_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export-BUILD-INFO.txt"
-
-          verify_variant \
-            "A - Archive Direct" \
-            "$ARCHIVE_DIRECT_IPA" \
-            "$DIRECT_VERIFY" \
-            "$DIRECT_INFO" \
-            "Xcode archive -> direct Payload packaging"
-
-          verify_variant \
-            "B - Xcode Export" \
-            "$XCODE_EXPORT_IPA" \
-            "$EXPORT_VERIFY" \
-            "$EXPORT_INFO" \
-            "Xcode archive -> xcodebuild -exportArchive"
-
-          ARCHIVE_INFO_SHA="$(shasum -a 256 "$APP_PATH/Info.plist" | awk '{print $1}')"
-          DIRECT_INFO_SHA="$(shasum -a 256 "$DIRECT_VERIFY/Payload/HomeAssistant.app/Info.plist" | awk '{print $1}')"
-          EXPORT_INFO_SHA="$(shasum -a 256 "$EXPORT_VERIFY/Payload/HomeAssistant.app/Info.plist" | awk '{print $1}')"
-
-          ARCHIVE_EXEC_SHA="$(shasum -a 256 "$APP_PATH/HomeAssistant" | awk '{print $1}')"
-          DIRECT_EXEC_SHA="$(shasum -a 256 "$DIRECT_VERIFY/Payload/HomeAssistant.app/HomeAssistant" | awk '{print $1}')"
-          EXPORT_EXEC_SHA="$(shasum -a 256 "$EXPORT_VERIFY/Payload/HomeAssistant.app/HomeAssistant" | awk '{print $1}')"
-
-          COMPARISON="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-COMPARISON.txt"
-
-          {
-            echo "HomeAssistant Native Kiosk Audio - A/B Comparison"
-            echo "================================================="
-            echo
-            echo "Git commit:          $GITHUB_SHA"
-            echo "GitHub run:          $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
-            echo
-            echo "Info.plist SHA-256"
-            echo "  archive:           $ARCHIVE_INFO_SHA"
-            echo "  archive-direct:    $DIRECT_INFO_SHA"
-            echo "  xcode-export:      $EXPORT_INFO_SHA"
-            echo
-            echo "Main executable SHA-256"
-            echo "  archive:           $ARCHIVE_EXEC_SHA"
-            echo "  archive-direct:    $DIRECT_EXEC_SHA"
-            echo "  xcode-export:      $EXPORT_EXEC_SHA"
-            echo
-            echo "IPA SHA-256"
-            echo "  archive-direct:    $(shasum -a 256 "$ARCHIVE_DIRECT_IPA" | awk '{print $1}')"
-            echo "  xcode-export:      $(shasum -a 256 "$XCODE_EXPORT_IPA" | awk '{print $1}')"
-          } | tee "$COMPARISON"
-
-          [ "$ARCHIVE_INFO_SHA" = "$DIRECT_INFO_SHA" ] || {
-            echo "::error::Archive-direct packaging changed Info.plist bytes"
+          [ -s "$ARCHIVE_TARBALL" ] || {
+            echo "::error::Archive tarball was not created"
             exit 1
           }
 
-          [ "$ARCHIVE_EXEC_SHA" = "$DIRECT_EXEC_SHA" ] || {
-            echo "::error::Archive-direct packaging changed executable bytes"
-            exit 1
-          }
+          echo "Signed archive artifact:"
+          ls -lh "$ARCHIVE_TARBALL"
+          shasum -a 256 "$ARCHIVE_TARBALL"
 
-          {
-            echo "## A/B byte comparison"
-            echo
-            echo "| File | Archive | A: Direct | B: Xcode Export |"
-            echo "|---|---|---|---|"
-            echo "| Info.plist SHA-256 | \`$ARCHIVE_INFO_SHA\` | \`$DIRECT_INFO_SHA\` | \`$EXPORT_INFO_SHA\` |"
-            echo "| HomeAssistant SHA-256 | \`$ARCHIVE_EXEC_SHA\` | \`$DIRECT_EXEC_SHA\` | \`$EXPORT_EXEC_SHA\` |"
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "ARCHIVE_TARBALL=$ARCHIVE_TARBALL" >> "$GITHUB_ENV"
 
-      - name: Build C - minimal signing probe IPA
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PROBE_ROOT="$PWD/build/signing-probe"
-          PROBE_STAGE="$PROBE_ROOT/stage"
-          PROBE_APP="$PROBE_STAGE/Payload/HomeAssistantSigningProbe.app"
-          PROBE_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe.ipa"
-          PROBE_ENT="$PROBE_ROOT/probe-entitlements.plist"
-          PROBE_SRC="$PROBE_ROOT/main.m"
-          PROBE_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe-BUILD-INFO.txt"
-
-          rm -rf "$PROBE_ROOT"
-          mkdir -p "$PROBE_APP" "$PWD/build/ipa"
-
-          cat > "$PROBE_SRC" <<'EOF'
-          #import <UIKit/UIKit.h>
-
-          @interface AppDelegate : UIResponder <UIApplicationDelegate>
-          @property (strong, nonatomic) UIWindow *window;
-          @end
-
-          @implementation AppDelegate
-
-          - (BOOL)application:(UIApplication *)application
-              didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
-          {
-              self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-
-              UIViewController *controller = [UIViewController new];
-              controller.view.backgroundColor = [UIColor systemBackgroundColor];
-
-              UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
-              label.translatesAutoresizingMaskIntoConstraints = NO;
-              label.text = @"HomeAssistant Signing Probe";
-              label.textAlignment = NSTextAlignmentCenter;
-              label.numberOfLines = 0;
-              label.font = [UIFont systemFontOfSize:24 weight:UIFontWeightSemibold];
-
-              [controller.view addSubview:label];
-
-              [NSLayoutConstraint activateConstraints:@[
-                  [label.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
-                  [label.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor],
-                  [label.leadingAnchor constraintGreaterThanOrEqualToAnchor:controller.view.leadingAnchor constant:24],
-                  [label.trailingAnchor constraintLessThanOrEqualToAnchor:controller.view.trailingAnchor constant:-24]
-              ]];
-
-              self.window.rootViewController = controller;
-              [self.window makeKeyAndVisible];
-              return YES;
-          }
-
-          @end
-
-          int main(int argc, char * argv[]) {
-              @autoreleasepool {
-                  return UIApplicationMain(
-                      argc,
-                      argv,
-                      nil,
-                      NSStringFromClass([AppDelegate class])
-                  );
-              }
-          }
-          EOF
-
-          cat > "$PROBE_APP/Info.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleDisplayName</key>
-              <string>HA Signing Probe</string>
-              <key>CFBundleExecutable</key>
-              <string>HomeAssistantSigningProbe</string>
-              <key>CFBundleIdentifier</key>
-              <string>$MAIN_BUNDLE_ID</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>HomeAssistantSigningProbe</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>LSRequiresIPhoneOS</key>
-              <true/>
-              <key>MinimumOSVersion</key>
-              <string>18.0</string>
-              <key>UIDeviceFamily</key>
-              <array>
-                  <integer>1</integer>
-                  <integer>2</integer>
-              </array>
-              <key>UILaunchScreen</key>
-              <dict/>
-              <key>UISupportedInterfaceOrientations</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-                  <string>UIInterfaceOrientationLandscapeLeft</string>
-                  <string>UIInterfaceOrientationLandscapeRight</string>
-              </array>
-              <key>UISupportedInterfaceOrientations~ipad</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
-                  <string>UIInterfaceOrientationLandscapeLeft</string>
-                  <string>UIInterfaceOrientationLandscapeRight</string>
-              </array>
-          </dict>
-          </plist>
-          EOF
-
-          /usr/bin/plutil -lint "$PROBE_APP/Info.plist"
-
-          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
-
-          xcrun --sdk iphoneos clang \
-            -arch arm64 \
-            -isysroot "$SDK_PATH" \
-            -miphoneos-version-min=18.0 \
-            -fobjc-arc \
-            -framework UIKit \
-            -framework Foundation \
-            -framework CoreGraphics \
-            "$PROBE_SRC" \
-            -o "$PROBE_APP/HomeAssistantSigningProbe"
-
-          chmod 755 "$PROBE_APP/HomeAssistantSigningProbe"
-
-          # Reuse the exact provisioning profile embedded in the signed HA archive.
-          cp "$APP_PATH/embedded.mobileprovision" "$PROBE_APP/embedded.mobileprovision"
-
-          # Reuse the exact effective entitlements that Xcode signed into the HA app.
-          codesign -d --entitlements :- "$APP_PATH" > "$PROBE_ENT" 2>/dev/null
-          /usr/bin/plutil -lint "$PROBE_ENT"
-
-          echo "Signing probe with identity:"
-          echo "  $SIGNING_CERT_SHA1"
-
-          codesign \
-            --force \
-            --sign "$SIGNING_CERT_SHA1" \
-            --entitlements "$PROBE_ENT" \
-            --generate-entitlement-der \
-            --timestamp=none \
-            "$PROBE_APP"
-
-          echo ""
-          echo "Probe signature:"
-          codesign -dvvv "$PROBE_APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=' || true
-
-          echo ""
-          echo "Probe entitlements:"
-          codesign -d --entitlements :- "$PROBE_APP" 2>/dev/null
-
-          codesign --verify --strict --verbose=4 "$PROBE_APP"
-
-          (
-            cd "$PROBE_STAGE"
-            /usr/bin/ditto -c -k --keepParent Payload "$PROBE_IPA"
-          )
-
-          [ -s "$PROBE_IPA" ] || {
-            echo "::error::Signing probe IPA was not created"
-            exit 1
-          }
-
-          PROBE_INFO_SHA="$(shasum -a 256 "$PROBE_APP/Info.plist" | awk '{print $1}')"
-          PROBE_EXEC_SHA="$(shasum -a 256 "$PROBE_APP/HomeAssistantSigningProbe" | awk '{print $1}')"
-          PROBE_IPA_SHA="$(shasum -a 256 "$PROBE_IPA" | awk '{print $1}')"
-
-          {
-            echo "HomeAssistant Signing Probe - Build Information"
-            echo "==============================================="
-            echo
-            echo "Purpose:                  Isolate Apple signing/profile from HA bundle structure"
-            echo "Git branch:               $GITHUB_REF_NAME"
-            echo "Git commit:               $GITHUB_SHA"
-            echo "GitHub run:               $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
-            echo "Bundle ID:                $MAIN_BUNDLE_ID"
-            echo "Team ID:                  $TEAM_ID"
-            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
-            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
-            echo "Info.plist SHA-256:       $PROBE_INFO_SHA"
-            echo "Executable SHA-256:       $PROBE_EXEC_SHA"
-            echo "IPA SHA-256:              $PROBE_IPA_SHA"
-            echo "Signing:                  manual codesign using exact HA effective entitlements"
-            echo "Verification:             SUCCESS"
-          } | tee "$PROBE_INFO"
-
-          {
-            echo "## C - Minimal signing probe"
-            echo
-            echo "| Check | Value |"
-            echo "|---|---|"
-            printf '| Bundle ID | \`%s\` |\n' "$MAIN_BUNDLE_ID"
-            printf '| Team ID | \`%s\` |\n' "$TEAM_ID"
-            printf '| Main profile | \`%s\` |\n' "$MAIN_PROFILE_NAME"
-            printf '| Info.plist SHA-256 | \`%s\` |\n' "$PROBE_INFO_SHA"
-            printf '| Executable SHA-256 | \`%s\` |\n' "$PROBE_EXEC_SHA"
-            printf '| IPA SHA-256 | \`%s\` |\n' "$PROBE_IPA_SHA"
-            printf '| codesign verification | \`SUCCESS\` |\n'
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload C - minimal signing probe IPA
+      - name: Upload reusable signed Xcode archive
         uses: actions/upload-artifact@v4
         with:
-          name: HomeAssistant-Native-Kiosk-Audio-C-signing-probe
-          path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe-BUILD-INFO.txt
+          name: HomeAssistant-Native-Kiosk-Audio-xcarchive
+          path: build/HomeAssistant-Kiosk.xcarchive.tar.gz
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
           overwrite: true
 
-      - name: Build D - HA Info.plist probe IPA
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          D_ROOT="$PWD/build/ha-info-probe"
-          D_STAGE="$D_ROOT/stage"
-          D_APP="$D_STAGE/Payload/HomeAssistantInfoProbe.app"
-          D_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe.ipa"
-          D_ENT="$D_ROOT/entitlements.plist"
-          D_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe-BUILD-INFO.txt"
-
-          C_APP="$PWD/build/signing-probe/stage/Payload/HomeAssistantSigningProbe.app"
-
-          [ -d "$C_APP" ] || {
-            echo "::error::C probe app not found at $C_APP"
-            exit 1
-          }
-
-          rm -rf "$D_ROOT"
-          mkdir -p "$D_STAGE/Payload"
-
-          # Start from the real archived HA bundle so all non-code resources
-          # referenced by the real Info.plist remain present.
-          /usr/bin/ditto "$APP_PATH" "$D_APP"
-
-          # Remove all executable/nested-code variables from the equation.
-          rm -rf \
-            "$D_APP/_CodeSignature" \
-            "$D_APP/Frameworks" \
-            "$D_APP/PlugIns"
-          rm -f "$D_APP/HomeAssistant"
-
-          # Use the known-good minimal probe executable from variant C.
-          cp "$C_APP/HomeAssistantSigningProbe" "$D_APP/HomeAssistantSigningProbe"
-          chmod 755 "$D_APP/HomeAssistantSigningProbe"
-
-          # Keep the real HA Info.plist byte-for-byte except for the executable
-          # name, which must point at the probe binary.
-          /usr/libexec/PlistBuddy \
-            -c 'Set :CFBundleExecutable HomeAssistantSigningProbe' \
-            "$D_APP/Info.plist"
-
-          /usr/bin/plutil -lint "$D_APP/Info.plist"
-
-          # Same profile and exact effective entitlements as the real HA app.
-          cp "$APP_PATH/embedded.mobileprovision" "$D_APP/embedded.mobileprovision"
-          codesign -d --entitlements :- "$APP_PATH" > "$D_ENT" 2>/dev/null
-
-          codesign \
-            --force \
-            --sign "$SIGNING_CERT_SHA1" \
-            --entitlements "$D_ENT" \
-            --generate-entitlement-der \
-            --timestamp=none \
-            "$D_APP"
-
-          codesign --verify --strict --verbose=4 "$D_APP"
-
-          (
-            cd "$D_STAGE"
-            /usr/bin/ditto -c -k --keepParent Payload "$D_IPA"
-          )
-
-          [ -s "$D_IPA" ] || {
-            echo "::error::D HA Info.plist probe IPA was not created"
-            exit 1
-          }
-
-          D_INFO_SHA="$(shasum -a 256 "$D_APP/Info.plist" | awk '{print $1}')"
-          D_EXEC_SHA="$(shasum -a 256 "$D_APP/HomeAssistantSigningProbe" | awk '{print $1}')"
-          D_IPA_SHA="$(shasum -a 256 "$D_IPA" | awk '{print $1}')"
-
-          {
-            echo "HomeAssistant D - HA Info.plist Probe"
-            echo "====================================="
-            echo
-            echo "Purpose:                  Test real HA Info.plist/resources with known-good probe executable"
-            echo "Git commit:               $GITHUB_SHA"
-            echo "Bundle ID:                $MAIN_BUNDLE_ID"
-            echo "Team ID:                  $TEAM_ID"
-            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
-            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
-            echo "Info.plist SHA-256:       $D_INFO_SHA"
-            echo "Executable SHA-256:       $D_EXEC_SHA"
-            echo "IPA SHA-256:              $D_IPA_SHA"
-            echo "Frameworks:               REMOVED"
-            echo "PlugIns:                  REMOVED"
-            echo "Verification:             SUCCESS"
-          } | tee "$D_INFO"
-
-      - name: Upload D - HA Info.plist probe IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe
-          path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe-BUILD-INFO.txt
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Build E - HA binary with minimal Info.plist
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          E_ROOT="$PWD/build/ha-binary-probe"
-          E_STAGE="$E_ROOT/stage"
-          E_APP="$E_STAGE/Payload/HomeAssistantBinaryProbe.app"
-          E_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe.ipa"
-          E_ENT="$E_ROOT/entitlements.plist"
-          E_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe-BUILD-INFO.txt"
-
-          C_APP="$PWD/build/signing-probe/stage/Payload/HomeAssistantSigningProbe.app"
-
-          [ -d "$C_APP" ] || {
-            echo "::error::C probe app not found at $C_APP"
-            exit 1
-          }
-
-          rm -rf "$E_ROOT"
-          mkdir -p "$E_STAGE/Payload"
-
-          # Keep the real HA executable, Frameworks, Notification Service and
-          # all resources. Only the main app Info.plist is replaced.
-          /usr/bin/ditto "$APP_PATH" "$E_APP"
-          rm -rf "$E_APP/_CodeSignature"
-
-          cp "$C_APP/Info.plist" "$E_APP/Info.plist"
-
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable HomeAssistant' "$E_APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleName HomeAssistant' "$E_APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName HA Binary Probe' "$E_APP/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAIN_BUNDLE_ID" "$E_APP/Info.plist"
-
-          /usr/bin/plutil -lint "$E_APP/Info.plist"
-
-          cp "$APP_PATH/embedded.mobileprovision" "$E_APP/embedded.mobileprovision"
-          codesign -d --entitlements :- "$APP_PATH" > "$E_ENT" 2>/dev/null
-
-          # Nested code remains byte-identical and keeps its existing valid
-          # signatures. Re-sign only the outer app so CodeResources seals the
-          # new minimal Info.plist and existing nested code.
-          codesign \
-            --force \
-            --sign "$SIGNING_CERT_SHA1" \
-            --entitlements "$E_ENT" \
-            --generate-entitlement-der \
-            --timestamp=none \
-            "$E_APP"
-
-          codesign --verify --deep --strict --verbose=4 "$E_APP"
-
-          (
-            cd "$E_STAGE"
-            /usr/bin/ditto -c -k --keepParent Payload "$E_IPA"
-          )
-
-          [ -s "$E_IPA" ] || {
-            echo "::error::E HA binary probe IPA was not created"
-            exit 1
-          }
-
-          E_INFO_SHA="$(shasum -a 256 "$E_APP/Info.plist" | awk '{print $1}')"
-          E_EXEC_SHA="$(shasum -a 256 "$E_APP/HomeAssistant" | awk '{print $1}')"
-          E_IPA_SHA="$(shasum -a 256 "$E_IPA" | awk '{print $1}')"
-
-          {
-            echo "HomeAssistant E - HA Binary Probe"
-            echo "================================="
-            echo
-            echo "Purpose:                  Test real HA executable/nested code with known-good minimal Info.plist"
-            echo "Git commit:               $GITHUB_SHA"
-            echo "Bundle ID:                $MAIN_BUNDLE_ID"
-            echo "Team ID:                  $TEAM_ID"
-            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
-            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
-            echo "Info.plist SHA-256:       $E_INFO_SHA"
-            echo "Executable SHA-256:       $E_EXEC_SHA"
-            echo "IPA SHA-256:              $E_IPA_SHA"
-            echo "Frameworks:               REAL HA"
-            echo "PlugIns:                  REAL HA"
-            echo "Verification:             SUCCESS"
-          } | tee "$E_INFO"
-
-      - name: Upload E - HA binary probe IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe
-          path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe-BUILD-INFO.txt
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Build F - original HA app manually re-signed
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          F_ROOT="$PWD/build/ha-manual-resign"
-          F_STAGE="$F_ROOT/stage"
-          F_APP="$F_STAGE/Payload/HomeAssistant.app"
-          F_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign.ipa"
-          F_ENT="$F_ROOT/entitlements.plist"
-          F_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign-BUILD-INFO.txt"
-
-          rm -rf "$F_ROOT"
-          mkdir -p "$F_STAGE/Payload"
-
-          # Copy the archived HA app byte-for-byte first.
-          /usr/bin/ditto "$APP_PATH" "$F_APP"
-
-          # Preserve the exact effective entitlements of the original Xcode-signed app.
-          codesign -d --entitlements :- "$APP_PATH" > "$F_ENT" 2>/dev/null
-          /usr/bin/plutil -lint "$F_ENT"
-
-          ORIGINAL_INFO_SHA="$(shasum -a 256 "$APP_PATH/Info.plist" | awk '{print $1}')"
-          ORIGINAL_EXEC_SHA="$(shasum -a 256 "$APP_PATH/HomeAssistant" | awk '{print $1}')"
-
-          echo "Original Xcode signature:"
-          codesign -dvvv "$APP_PATH" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=|Timestamp=' || true
-
-          echo ""
-          echo "Original designated requirement:"
-          codesign -d -r- "$APP_PATH" 2>&1 || true
-
-          # Re-sign ONLY the outer application bundle. Nested frameworks and
-          # Notification Service keep their existing Xcode signatures.
-          codesign \
-            --force \
-            --sign "$SIGNING_CERT_SHA1" \
-            --entitlements "$F_ENT" \
-            --generate-entitlement-der \
-            --timestamp=none \
-            "$F_APP"
-
-          echo ""
-          echo "Manual outer-app signature:"
-          codesign -dvvv "$F_APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=|Timestamp=' || true
-
-          echo ""
-          echo "Manual designated requirement:"
-          codesign -d -r- "$F_APP" 2>&1 || true
-
-          codesign --verify --deep --strict --verbose=4 "$F_APP"
-
-          F_INFO_SHA="$(shasum -a 256 "$F_APP/Info.plist" | awk '{print $1}')"
-          F_EXEC_SHA="$(shasum -a 256 "$F_APP/HomeAssistant" | awk '{print $1}')"
-
-          [ "$ORIGINAL_INFO_SHA" = "$F_INFO_SHA" ] || {
-            echo "::error::Manual re-sign changed Info.plist bytes"
-            exit 1
-          }
-
-          [ "$ORIGINAL_EXEC_SHA" != "$F_EXEC_SHA" ] || {
-            echo "::warning::Executable SHA did not change after re-sign; inspect signature handling"
-          }
-
-          (
-            cd "$F_STAGE"
-            /usr/bin/ditto -c -k --keepParent Payload "$F_IPA"
-          )
-
-          [ -s "$F_IPA" ] || {
-            echo "::error::F manual re-sign IPA was not created"
-            exit 1
-          }
-
-          F_IPA_SHA="$(shasum -a 256 "$F_IPA" | awk '{print $1}')"
-
-          {
-            echo "HomeAssistant F - Manual Outer-App Re-sign"
-            echo "=========================================="
-            echo
-            echo "Purpose:                  Test Xcode outer-app signature vs manual codesign"
-            echo "Git commit:               $GITHUB_SHA"
-            echo "Bundle ID:                $MAIN_BUNDLE_ID"
-            echo "Team ID:                  $TEAM_ID"
-            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
-            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
-            echo "Original Info.plist SHA:  $ORIGINAL_INFO_SHA"
-            echo "Re-signed Info.plist SHA: $F_INFO_SHA"
-            echo "Original executable SHA:  $ORIGINAL_EXEC_SHA"
-            echo "Re-signed executable SHA: $F_EXEC_SHA"
-            echo "IPA SHA-256:              $F_IPA_SHA"
-            echo "Nested code:              unchanged Xcode signatures"
-            echo "Outer app:                manually re-signed"
-            echo "Verification:             SUCCESS"
-          } | tee "$F_INFO"
-
-          INFO_UNCHANGED="NO"
-          if [ "$ORIGINAL_INFO_SHA" = "$F_INFO_SHA" ]; then
-            INFO_UNCHANGED="YES"
-          fi
-
-          {
-            echo "## F - Original HA app, manually re-signed"
-            echo
-            echo "| Check | Value |"
-            echo "|---|---|"
-            printf '| Info.plist unchanged | \`%s\` |\n' "$INFO_UNCHANGED"
-            printf '| Original Info.plist SHA-256 | \`%s\` |\n' "$ORIGINAL_INFO_SHA"
-            printf '| Re-signed Info.plist SHA-256 | \`%s\` |\n' "$F_INFO_SHA"
-            printf '| Original executable SHA-256 | \`%s\` |\n' "$ORIGINAL_EXEC_SHA"
-            printf '| Re-signed executable SHA-256 | \`%s\` |\n' "$F_EXEC_SHA"
-            printf '| IPA SHA-256 | \`%s\` |\n' "$F_IPA_SHA"
-            printf '| codesign verification | \`SUCCESS\` |\n'
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload F - original HA app manually re-signed
-        uses: actions/upload-artifact@v4
-        with:
-          name: HomeAssistant-Native-Kiosk-Audio-F-manual-resign
-          path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign-BUILD-INFO.txt
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Upload A - archive-direct IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: HomeAssistant-Native-Kiosk-Audio-A-archive-direct
-          path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct-BUILD-INFO.txt
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-COMPARISON.txt
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Upload B - Xcode-export IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: HomeAssistant-Native-Kiosk-Audio-B-xcode-export
-          path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export-BUILD-INFO.txt
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-COMPARISON.txt
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Upload Xcode logs
+      - name: Upload archive build log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: NativeKioskAudio-xcode-logs
-          path: |
-            build/xcodebuild-archive.log
-            build/xcodebuild-export.log
+          name: NativeKioskAudio-xcode-archive-log
+          path: build/xcodebuild-archive.log
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 30
           overwrite: true
 
       - name: Cleanup signing material
@@ -1887,3 +937,413 @@ jobs:
           fi
 
           rm -rf "$RUNNER_TEMP/kiosk-signing"
+
+  package:
+    name: Package final kiosk IPA
+    needs: archive
+    if: ${{ always() && (needs.archive.result == 'success' || needs.archive.result == 'skipped') }}
+    runs-on: macos-26
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve reusable archive run
+        id: archive_source
+        shell: bash
+        env:
+          REUSE_RUN_ID: ${{ inputs.archive_run_id }}
+          ARCHIVE_JOB_RESULT: ${{ needs.archive.result }}
+        run: |
+          set -euo pipefail
+
+          if [ "$ARCHIVE_JOB_RESULT" = "success" ]; then
+            SOURCE_RUN_ID="$GITHUB_RUN_ID"
+            SOURCE_MODE="current-run"
+          else
+            SOURCE_RUN_ID="${REUSE_RUN_ID:-}"
+            SOURCE_MODE="reused-run"
+          fi
+
+          if [ -z "$SOURCE_RUN_ID" ]; then
+            echo "::error::No reusable archive run ID is available"
+            exit 1
+          fi
+
+          case "$SOURCE_RUN_ID" in
+            *[!0-9]*)
+              echo "::error::archive_run_id must contain digits only: $SOURCE_RUN_ID"
+              exit 1
+              ;;
+          esac
+
+          echo "run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "mode=$SOURCE_MODE" >> "$GITHUB_OUTPUT"
+
+          echo "Archive source:"
+          echo "  mode:   $SOURCE_MODE"
+          echo "  run ID: $SOURCE_RUN_ID"
+
+      - name: Download signed Xcode archive
+        uses: actions/download-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-xcarchive
+          path: build/archive-download
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.archive_source.outputs.run_id }}
+
+      - name: Restore signed Xcode archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE_TARBALL="$PWD/build/archive-download/HomeAssistant-Kiosk.xcarchive.tar.gz"
+          RESTORE_DIR="$PWD/build/restored"
+
+          [ -s "$ARCHIVE_TARBALL" ] || {
+            echo "::error::Downloaded archive tarball is missing"
+            find "$PWD/build/archive-download" -maxdepth 2 -print || true
+            exit 1
+          }
+
+          rm -rf "$RESTORE_DIR"
+          mkdir -p "$RESTORE_DIR"
+
+          tar -xzf "$ARCHIVE_TARBALL" -C "$RESTORE_DIR"
+
+          ARCHIVE_PATH="$RESTORE_DIR/HomeAssistant-Kiosk.xcarchive"
+          APP_PATH="$ARCHIVE_PATH/Products/Applications/HomeAssistant.app"
+
+          [ -d "$APP_PATH" ] || {
+            echo "::error::HomeAssistant.app not found in restored archive"
+            find "$RESTORE_DIR" -maxdepth 5 -print || true
+            exit 1
+          }
+
+          [ -x "$APP_PATH/HomeAssistant" ] || {
+            echo "::error::Restored HomeAssistant executable is not executable"
+            ls -l "$APP_PATH/HomeAssistant" || true
+            exit 1
+          }
+
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+          echo "Restored signed archive:"
+          echo "  $ARCHIVE_PATH"
+          echo "Source tarball SHA-256:"
+          shasum -a 256 "$ARCHIVE_TARBALL"
+
+      - name: Install packaging signing certificate
+        shell: bash
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in IOS_CERTIFICATE_P12_BASE64 IOS_CERTIFICATE_PASSWORD
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub secret $name is missing or empty"
+              exit 1
+            fi
+          done
+
+          SIGN_DIR="$RUNNER_TEMP/kiosk-package-signing"
+          mkdir -p "$SIGN_DIR"
+
+          P12_ORIGINAL="$SIGN_DIR/original.p12"
+          P12_PEM="$SIGN_DIR/p12.pem"
+          P12_APPLE="$SIGN_DIR/apple-compatible.p12"
+
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | base64 -D > "$P12_ORIGINAL"
+
+          openssl pkcs12 \
+            -in "$P12_ORIGINAL" \
+            -passin env:IOS_CERTIFICATE_PASSWORD \
+            -nodes \
+            -out "$P12_PEM"
+
+          grep -Eq 'BEGIN (PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY)' "$P12_PEM"
+          grep -q 'BEGIN CERTIFICATE' "$P12_PEM"
+
+          openssl pkcs12 \
+            -export \
+            -legacy \
+            -in "$P12_PEM" \
+            -out "$P12_APPLE" \
+            -name "HomeAssistant Kiosk Development" \
+            -passout env:IOS_CERTIFICATE_PASSWORD
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-package.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+
+          security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$P12_APPLE" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$IOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" >/dev/null
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          SIGNING_CERT_SHA1="$(
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | awk '/Apple Development/ {print $2; exit}'
+          )"
+
+          if [ -z "$SIGNING_CERT_SHA1" ]; then
+            echo "::error::No Apple Development signing identity found"
+            exit 1
+          fi
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "SIGNING_CERT_SHA1=$SIGNING_CERT_SHA1" >> "$GITHUB_ENV"
+
+          echo "Packaging signing identity:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Validate restored archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")"
+          [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || {
+            echo "::error::Unexpected main bundle ID: $MAIN_ID"
+            exit 1
+          }
+
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")"
+          [ "$EXECUTABLE" = "HomeAssistant" ] || {
+            echo "::error::Unexpected executable: $EXECUTABLE"
+            exit 1
+          }
+
+          NSE="$(
+            find "$APP_PATH/PlugIns" \
+              -maxdepth 1 \
+              -type d \
+              -name '*.appex' \
+              -print \
+              -quit
+          )"
+
+          [ -n "$NSE" ] && [ -d "$NSE" ] || {
+            echo "::error::Notification Service extension is missing"
+            exit 1
+          }
+
+          NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
+          [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || {
+            echo "::error::Unexpected Notification Service bundle ID: $NSE_ID"
+            exit 1
+          }
+
+          [ -f "$APP_PATH/GoogleService-Info-Debug.plist" ] || {
+            echo "::error::Firebase configuration is missing"
+            exit 1
+          }
+
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+
+          ARCHIVE_ENT="$PWD/build/archive-entitlements.plist"
+          codesign -d --entitlements :- "$APP_PATH" > "$ARCHIVE_ENT" 2>/dev/null
+          /usr/bin/plutil -lint "$ARCHIVE_ENT"
+
+          python3 - "$ARCHIVE_ENT" "$MAIN_BUNDLE_ID" "$APP_GROUP_ID" "$TEAM_ID" <<'PY'
+          import plistlib
+          import sys
+
+          path, bundle_id, app_group, team = sys.argv[1:]
+          with open(path, "rb") as f:
+              ent = plistlib.load(f)
+
+          expected_app_id = f"{team}.{bundle_id}"
+          expected_keychain = expected_app_id
+
+          checks = [
+              (ent.get("application-identifier") == expected_app_id, "application-identifier"),
+              (ent.get("com.apple.developer.team-identifier") == team, "team identifier"),
+              (ent.get("aps-environment") == "development", "aps-environment"),
+              (app_group in ent.get("com.apple.security.application-groups", []), "App Group"),
+              (expected_keychain in ent.get("keychain-access-groups", []), "keychain group"),
+          ]
+
+          failed = [name for ok, name in checks if not ok]
+          if failed:
+              raise SystemExit(
+                  "ERROR: Restored archive entitlement validation failed: "
+                  + ", ".join(failed)
+              )
+
+          print("Restored archive entitlements: OK")
+          PY
+
+      - name: Re-sign outer HomeAssistant app and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_ROOT="$PWD/build/final-package"
+          STAGE="$PACKAGE_ROOT/stage"
+          FINAL_APP="$STAGE/Payload/HomeAssistant.app"
+          FINAL_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
+          ENTITLEMENTS="$PACKAGE_ROOT/main-entitlements.plist"
+          BUILD_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt"
+
+          rm -rf "$PACKAGE_ROOT"
+          mkdir -p "$STAGE/Payload" "$PWD/build/ipa"
+
+          /usr/bin/ditto "$APP_PATH" "$FINAL_APP"
+
+          codesign -d --entitlements :- "$APP_PATH" > "$ENTITLEMENTS" 2>/dev/null
+          /usr/bin/plutil -lint "$ENTITLEMENTS"
+
+          ORIGINAL_INFO_SHA="$(shasum -a 256 "$APP_PATH/Info.plist" | awk '{print $1}')"
+          ORIGINAL_EXEC_SHA="$(shasum -a 256 "$APP_PATH/HomeAssistant" | awk '{print $1}')"
+
+          echo "Original Xcode outer-app signature:"
+          codesign -dvvv "$APP_PATH" 2>&1 \
+            | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=' \
+            || true
+
+          # Proven working fix from diagnostic variant F:
+          # leave every nested component untouched and re-sign only the outer
+          # HomeAssistant.app using its exact effective entitlements.
+          codesign \
+            --force \
+            --sign "$SIGNING_CERT_SHA1" \
+            --entitlements "$ENTITLEMENTS" \
+            --generate-entitlement-der \
+            --timestamp=none \
+            "$FINAL_APP"
+
+          echo ""
+          echo "Final outer-app signature:"
+          codesign -dvvv "$FINAL_APP" 2>&1 \
+            | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=' \
+            || true
+
+          codesign --verify --deep --strict --verbose=4 "$FINAL_APP"
+
+          FINAL_INFO_SHA="$(shasum -a 256 "$FINAL_APP/Info.plist" | awk '{print $1}')"
+          FINAL_EXEC_SHA="$(shasum -a 256 "$FINAL_APP/HomeAssistant" | awk '{print $1}')"
+
+          [ "$ORIGINAL_INFO_SHA" = "$FINAL_INFO_SHA" ] || {
+            echo "::error::Outer re-sign changed Info.plist bytes"
+            exit 1
+          }
+
+          FINAL_ENT="$PACKAGE_ROOT/final-entitlements.plist"
+          codesign -d --entitlements :- "$FINAL_APP" > "$FINAL_ENT" 2>/dev/null
+
+          python3 - "$ENTITLEMENTS" "$FINAL_ENT" <<'PY'
+          import plistlib
+          import sys
+
+          before_path, after_path = sys.argv[1:]
+
+          with open(before_path, "rb") as f:
+              before = plistlib.load(f)
+          with open(after_path, "rb") as f:
+              after = plistlib.load(f)
+
+          if before != after:
+              raise SystemExit("ERROR: Entitlements changed during outer-app re-sign")
+
+          print("Outer-app entitlements preserved exactly.")
+          PY
+
+          (
+            cd "$STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$FINAL_IPA"
+          )
+
+          [ -s "$FINAL_IPA" ] || {
+            echo "::error::Final IPA was not created"
+            exit 1
+          }
+
+          FINAL_IPA_SHA="$(shasum -a 256 "$FINAL_IPA" | awk '{print $1}')"
+
+          MAIN_PROFILE="$PACKAGE_ROOT/main-profile.plist"
+          security cms -D -i "$FINAL_APP/embedded.mobileprovision" > "$MAIN_PROFILE"
+
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$MAIN_PROFILE")"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$MAIN_PROFILE")"
+          APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$FINAL_APP/Info.plist")"
+          BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$FINAL_APP/Info.plist")"
+
+          {
+            echo "HomeAssistant Native Kiosk Audio - Final Build"
+            echo "=============================================="
+            echo
+            echo "Packaging run:             $GITHUB_RUN_ID"
+            echo "Source archive run:        ${{ steps.archive_source.outputs.run_id }}"
+            echo "Archive source mode:       ${{ steps.archive_source.outputs.mode }}"
+            echo "App version:               $APP_VERSION ($BUILD_VERSION)"
+            echo "Bundle ID:                 $MAIN_BUNDLE_ID"
+            echo "Team ID:                   $TEAM_ID"
+            echo "Signing certificate SHA1:  $SIGNING_CERT_SHA1"
+            echo "Provisioning profile:      $PROFILE_NAME"
+            echo "Provisioning profile UUID: $PROFILE_UUID"
+            echo "Original Info.plist SHA:   $ORIGINAL_INFO_SHA"
+            echo "Final Info.plist SHA:      $FINAL_INFO_SHA"
+            echo "Original executable SHA:   $ORIGINAL_EXEC_SHA"
+            echo "Final executable SHA:      $FINAL_EXEC_SHA"
+            echo "Final IPA SHA-256:         $FINAL_IPA_SHA"
+            echo "Nested code:               unchanged Xcode signatures"
+            echo "Outer app:                 manually re-signed"
+            echo "Verification:              SUCCESS"
+          } | tee "$BUILD_INFO"
+
+          {
+            echo "## Final Native Kiosk Audio IPA"
+            echo
+            echo "| Check | Value |"
+            echo "|---|---|"
+            printf '| Source archive run | `%s` |\n' "${{ steps.archive_source.outputs.run_id }}"
+            printf '| Source mode | `%s` |\n' "${{ steps.archive_source.outputs.mode }}"
+            printf '| Bundle ID | `%s` |\n' "$MAIN_BUNDLE_ID"
+            printf '| Team ID | `%s` |\n' "$TEAM_ID"
+            printf '| Provisioning profile | `%s` |\n' "$PROFILE_NAME"
+            printf '| Info.plist preserved | `YES` |\n'
+            printf '| Entitlements preserved | `YES` |\n'
+            printf '| codesign verification | `SUCCESS` |\n'
+            printf '| IPA SHA-256 | `%s` |\n' "$FINAL_IPA_SHA"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload final signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-signed
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Cleanup packaging signing material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1
+          fi
+
+          rm -rf "$RUNNER_TEMP/kiosk-package-signing"
+
