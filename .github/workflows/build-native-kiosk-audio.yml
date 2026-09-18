@@ -1,4 +1,4 @@
-name: Build Signed Native Kiosk Audio IPA
+name: Build Xcode-Signed Native Kiosk Audio IPA
 
 on:
   workflow_dispatch:
@@ -11,542 +11,199 @@ permissions:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+  MAIN_BUNDLE_ID: de.weber-schubert.homeassistant.kiosk
+  NOTIFICATION_BUNDLE_ID: de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
+  APP_GROUP_ID: group.de.weber-schubert.homeassistant.kiosk
+  TEAM_ID: QKSPJURFCD
 
 jobs:
   build:
-    name: Build unsigned iOS app
+    name: Build, archive and sign with Xcode
     runs-on: macos-26
     timeout-minutes: 90
 
     steps:
-      # =====================================================================
-      # Repository
-      # =====================================================================
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      # =====================================================================
-      # Umgebung anzeigen
-      # =====================================================================
 
       - name: Environment
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Xcode:"
           xcodebuild -version
-
-          echo ""
-          echo "Swift:"
           swift --version
-
-          echo ""
-          echo "macOS:"
           sw_vers
+          echo "Commit: $GITHUB_SHA"
+          echo "Branch: $GITHUB_REF_NAME"
 
-          echo ""
-          echo "Commit:"
-          git rev-parse HEAD
-
-          echo ""
-          echo "Branch:"
-          git branch --show-current
-
-      # =====================================================================
-      # Home-Assistant Runtime-Patch
-      #
-      # Problem:
-      #
-      # AppEnvironment initialisiert den Logger eager:
-      #
-      #   public var Log: XCGLogger = {
-      #
-      # Während dieser Initialisierung wird über AppConstants erneut auf
-      # Current / DependencyValues.environment zugegriffen.
-      #
-      # Auf dem Gerät führte das zu:
-      #
-      #   BUG IN CLIENT OF LIBDISPATCH:
-      #   trying to lock recursively
-      #
-      # Lösung:
-      #
-      # Logger erst beim ersten Zugriff erzeugen:
-      #
-      #   public lazy var Log: XCGLogger = {
-      #
-      # Der Patch ist absichtlich streng. Falls sich Upstream ändert,
-      # bricht der Workflow ab, statt unbemerkt eine andere Stelle zu
-      # verändern.
-      # =====================================================================
-
+      # -------------------------------------------------------------------
+      # Runtime patch used by the kiosk build.
+      # -------------------------------------------------------------------
       - name: Apply kiosk runtime patch
         shell: bash
         run: |
           set -euo pipefail
 
-          ENVIRONMENT_FILE="Sources/Shared/Environment/Environment.swift"
+          python3 - <<'PY'
+          from pathlib import Path
 
-          echo "Patching:"
-          echo "$ENVIRONMENT_FILE"
-
-          if [ ! -f "$ENVIRONMENT_FILE" ]; then
-            echo "::error::Environment.swift not found:"
-            echo "$ENVIRONMENT_FILE"
-            exit 1
-          fi
-
-          python3 - "$ENVIRONMENT_FILE" <<'PY'
-          import pathlib
-          import sys
-
-          path = pathlib.Path(sys.argv[1])
-
+          path = Path("Sources/Shared/Environment/Environment.swift")
           source = path.read_text(encoding="utf-8")
 
           old = "public var Log: XCGLogger = {"
           new = "public lazy var Log: XCGLogger = {"
 
-          count_old = source.count(old)
-          count_new = source.count(new)
-
-          print(f"Occurrences of original declaration: {count_old}")
-          print(f"Occurrences of patched declaration:  {count_new}")
-
-          if count_new == 1 and count_old == 0:
-              print("Runtime patch is already present.")
-              sys.exit(0)
-
-          if count_old != 1:
-              print(
-                  f"ERROR: Expected exactly one occurrence of:\n"
-                  f"  {old}\n"
-                  f"but found {count_old}."
+          if new in source and old not in source:
+              print("Runtime patch already present.")
+          elif source.count(old) == 1:
+              path.write_text(source.replace(old, new, 1), encoding="utf-8")
+              print("Runtime patch applied.")
+          else:
+              raise SystemExit(
+                  f"ERROR: Expected exactly one unpatched logger declaration, found {source.count(old)}"
               )
-              sys.exit(1)
+          PY
 
-          source = source.replace(old, new, 1)
+          grep -nF 'public lazy var Log: XCGLogger = {'             Sources/Shared/Environment/Environment.swift
+
+      # -------------------------------------------------------------------
+      # Build only the main iPad app and the remote-push Notification
+      # Service Extension. Everything else needs additional App IDs and
+      # provisioning profiles and is not required by the kiosk.
+      #
+      # Bundle IDs are produced by the regular HA build system:
+      #   App  -> de.weber-schubert.homeassistant.kiosk
+      #   NSE  -> de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
+      #
+      # Important: unlike the previous workflow, NOTHING is re-signed by a
+      # hand-written codesign pass after compilation. Xcode owns signing.
+      # -------------------------------------------------------------------
+      - name: Prepare kiosk Xcode configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > Configuration/HomeAssistant.overrides.xcconfig <<'EOF'
+// CI-only kiosk overrides.
+DEVELOPMENT_TEAM = QKSPJURFCD
+BUNDLE_ID_PREFIX = de.weber-schubert
+BUNDLE_ID_SUFFIX = .kiosk
+
+// Upstream uses ".HomeAssistant". Our registered App ID is lower-case.
+PRODUCT_BUNDLE_IDENTIFIER = $(BUNDLE_ID_PREFIX).homeassistant$(BUNDLE_ID_SUFFIX)$(PROVISIONING_SUFFIX)
+
+CODE_SIGN_STYLE_DEFAULT = Manual
+CODE_SIGN_IDENTITY = Apple Development
+
+PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_App = HomeAssistant Kiosk Development
+PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_Extensions_NotificationService = HomeAssistant Kiosk NotificationService Development
+
+ENABLE_CRITICAL_ALERTS_QKSPJURFCD = 0
+ENABLE_PUSH_PROVIDER_QKSPJURFCD = 0
+ENABLE_DEVICE_NAME_QKSPJURFCD = 0
+ENABLE_THREAD_NETWORK_CREDENTIALS_QKSPJURFCD = 0
+ENABLE_CARPLAY_QMQYCKL255 = 0
+ENABLE_CARPLAY_QKSPJURFCD = 0
+EOF
+
+          # Minimal entitlements that are actually present in our profiles.
+          cat > Configuration/Entitlements/App-ios.entitlements <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>aps-environment</key>
+    <string>development</string>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.de.weber-schubert.homeassistant.kiosk</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)de.weber-schubert.homeassistant.kiosk</string>
+    </array>
+</dict>
+</plist>
+EOF
+
+          cat > Configuration/Entitlements/Extension-ios.entitlements <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.de.weber-schubert.homeassistant.kiosk</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)de.weber-schubert.homeassistant.kiosk</string>
+    </array>
+</dict>
+</plist>
+EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("HomeAssistant.xcodeproj/project.pbxproj")
+          source = path.read_text(encoding="utf-8")
+
+          remove_lines = [
+              # Other embedded iOS extensions
+              '1155DD10250F4101003405C0 /* HomeAssistant-Extensions-Share.appex in Embed Foundation Extensions */',
+              '11B92913266F145000786588 /* HomeAssistant-Extensions-PushProvider.appex in Embed Foundation Extensions */',
+              'B627CB151D83C87B0057173E /* HomeAssistant-Extensions-NotificationContent.appex in Embed Foundation Extensions */',
+              '1171507624DFCDEE0065E874 /* HomeAssistant-Extensions-Widgets.appex in Embed Foundation Extensions */',
+              '11B6B5822948F8E100B8B552 /* HomeAssistant-Extensions-Matter.appex in Embed Foundation Extensions */',
+              'B66C58AC215086F0004AB261 /* HomeAssistant-Extensions-Intents.appex in Embed Foundation Extensions */',
+
+              # Watch product
+              'B6CC5D9E2159D10F00833E5D /* HomeAssistant-WatchApp.app in Embed Watch Content */',
+
+              # App target dependencies not used by kiosk
+              'B66C58AB215086F0004AB261 /* PBXTargetDependency */',
+              'B627CB141D83C87B0057173E /* PBXTargetDependency */',
+              '1155DD0F250F4101003405C0 /* PBXTargetDependency */',
+              '1171507524DFCDEE0065E874 /* PBXTargetDependency */',
+              'B6CC5D9D2159D10F00833E5D /* PBXTargetDependency */',
+              '11DE9F9825B6173D0081C0ED /* PBXTargetDependency */',
+              '11B92912266F145000786588 /* PBXTargetDependency */',
+              '11B6B5812948F8E100B8B552 /* PBXTargetDependency */',
+          ]
+
+          for token in remove_lines:
+              matches = [line for line in source.splitlines() if token in line]
+              if not matches:
+                  raise SystemExit(f"ERROR: Project token not found: {token}")
+              source = "\n".join(
+                  line for line in source.splitlines()
+                  if token not in line
+              ) + "\n"
+
+          # The one extension that must remain.
+          required = (
+              'B6AAD7A81D827DD40090B220 '
+              '/* HomeAssistant-Extensions-NotificationService.appex in Embed Foundation Extensions */'
+          )
+          if required not in source:
+              raise SystemExit("ERROR: Notification Service embed entry was removed unexpectedly")
 
           path.write_text(source, encoding="utf-8")
-
-          print("Runtime patch applied successfully.")
+          print("Project reduced to App + Notification Service for kiosk archive.")
           PY
 
           echo ""
-          echo "Patched declaration:"
-
-          grep -nF \
-            'public lazy var Log: XCGLogger = {' \
-            "$ENVIRONMENT_FILE"
-
-          echo ""
-          echo "Git diff:"
-
-          git diff -- "$ENVIRONMENT_FILE"
-
-          if ! grep -F \
-            'public lazy var Log: XCGLogger = {' \
-            "$ENVIRONMENT_FILE" >/dev/null; then
-
-            echo "::error::Runtime patch verification failed"
-            exit 1
-          fi
-
-          echo ""
-          echo "Runtime patch verified."
-
-      # =====================================================================
-      # Swift Package Manager
-      #
-      # KEIN -sdk iphoneos!
-      #
-      # Xcode muss selbst entscheiden, welche Abhängigkeiten für iOS bzw.
-      # watchOS mit welchem SDK gebaut werden.
-      # =====================================================================
-
-      - name: Resolve Swift packages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          xcodebuild \
-            -project HomeAssistant.xcodeproj \
-            -scheme App-Debug \
-            -resolvePackageDependencies
-
-      # =====================================================================
-      # Unsigned iOS Device Build
-      #
-      # Wichtig:
-      #
-      #   -destination generic/platform=iOS
-      #
-      # aber bewusst KEIN:
-      #
-      #   -sdk iphoneos
-      #
-      # Sonst werden auch watchOS-Abhängigkeiten auf iphoneos gezwungen.
-      #
-      #
-      # ENABLE_DEBUG_DYLIB=NO
-      #
-      # Xcode kann bei Debug-Builds ein Stub-Executable erzeugen, welches
-      # den eigentlichen App-Code aus:
-      #
-      #   <AppName>.debug.dylib
-      #
-      # lädt.
-      #
-      # Genau das führte auf dem iPad zum früheren Start-Crash:
-      #
-      #   Termination Reason: DYLD
-      #   Library missing
-      #
-      # Für unsere eigenständig signierte Kiosk-IPA wird dieses Layout
-      # deshalb explizit deaktiviert.
-      # =====================================================================
-
-      - name: Build unsigned device app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$PWD/build"
-
-          xcodebuild \
-            -project HomeAssistant.xcodeproj \
-            -scheme App-Debug \
-            -configuration Debug \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$PWD/build/DerivedData" \
-            ENABLE_DEBUG_DYLIB=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            build \
-            | tee "$PWD/build/xcodebuild.log"
-
-      # =====================================================================
-      # Build-Produkt suchen
-      # =====================================================================
-
-      - name: Locate application bundle
-        id: locate_app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
-
-          echo "Build products:"
-
-          find "$PWD/build/DerivedData/Build/Products" \
-            -maxdepth 3 \
-            -type d \
-            -name '*.app' \
-            -print || true
-
-          APP_PATH="$(
-            find "$PRODUCT_DIR" \
-              -maxdepth 1 \
-              -type d \
-              -name 'Home Assistant*.app' \
-              -print \
-              -quit
-          )"
-
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Home Assistant application bundle not found in $PRODUCT_DIR"
-            exit 1
-          fi
-
-          INFO_PLIST="$APP_PATH/Info.plist"
-
-          if [ ! -f "$INFO_PLIST" ]; then
-            echo "::error::Info.plist not found:"
-            echo "$INFO_PLIST"
-            exit 1
-          fi
-
-          ORIGINAL_EXECUTABLE="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleExecutable' \
-              "$INFO_PLIST"
-          )"
-
-          if [ -z "$ORIGINAL_EXECUTABLE" ]; then
-            echo "::error::CFBundleExecutable is empty"
-            exit 1
-          fi
-
-          ORIGINAL_EXECUTABLE_PATH="$APP_PATH/$ORIGINAL_EXECUTABLE"
-
-          if [ ! -f "$ORIGINAL_EXECUTABLE_PATH" ]; then
-            echo "::error::Executable not found:"
-            echo "$ORIGINAL_EXECUTABLE_PATH"
-            exit 1
-          fi
-
-          echo ""
-          echo "Application bundle:"
-          echo "$APP_PATH"
-
-          echo ""
-          echo "Application bundle size:"
-          du -sh "$APP_PATH"
-
-          echo ""
-          echo "CFBundleExecutable:"
-          echo "$ORIGINAL_EXECUTABLE"
-
-          echo ""
-          echo "Executable:"
-          ls -lh "$ORIGINAL_EXECUTABLE_PATH"
-
-          echo ""
-          echo "Executable type:"
-          file "$ORIGINAL_EXECUTABLE_PATH"
-
-          echo ""
-          echo "Mach-O dependencies:"
-          otool -L "$ORIGINAL_EXECUTABLE_PATH"
-
-          echo ""
-          echo "Checking original executable for debug dylib dependency..."
-
-          if otool -L "$ORIGINAL_EXECUTABLE_PATH" \
-            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
-
-            echo "::error::Original executable still references a debug dylib:"
-
-            otool -L "$ORIGINAL_EXECUTABLE_PATH" \
-              | grep -E '\.debug\.dylib([[:space:]]|$)' || true
-
-            exit 1
-          fi
-
-          echo "No debug dylib dependency found."
-
-          echo ""
-          echo "Embedded applications/extensions before kiosk cleanup:"
-
-          find "$APP_PATH" \
-            -mindepth 1 \
-            -maxdepth 6 \
-            \( \
-              -type d -name '*.app' \
-              -o \
-              -type d -name '*.appex' \
-              -o \
-              -type d -name 'Watch' \
-              -o \
-              -type d -name 'WatchKitSupport2' \
-              -o \
-              -type d -name 'PlugIns' \
-            \) \
-            -print || true
-
-          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
-
-
-      # =====================================================================
-      # Unsigned .app verlustfrei fuer den Signing-Job archivieren
-      #
-      # GitHub Artifacts selbst erhalten POSIX-Dateirechte nicht garantiert.
-      # Deshalb wird das komplette .app zuerst mit ditto in ein ZIP gepackt.
-      # =====================================================================
-
-      - name: Package unsigned app artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
-          ARTIFACT_DIR="$PWD/build/unsigned-app-artifact"
-          ARTIFACT_ZIP="$ARTIFACT_DIR/HomeAssistant-unsigned-app.zip"
-
-          rm -rf "$ARTIFACT_DIR"
-          mkdir -p "$ARTIFACT_DIR"
-
-          if [ ! -d "$APP_PATH" ]; then
-            echo "::error::Unsigned application bundle not found:"
-            echo "$APP_PATH"
-            exit 1
-          fi
-
-          echo "Archiving unsigned application:"
-          echo "  $APP_PATH"
-
-          ditto \
-            -c \
-            -k \
-            --sequesterRsrc \
-            --keepParent \
-            "$APP_PATH" \
-            "$ARTIFACT_ZIP"
-
-          if [ ! -s "$ARTIFACT_ZIP" ]; then
-            echo "::error::Unsigned app archive was not created"
-            exit 1
-          fi
-
-          echo ""
-          echo "Testing archive integrity..."
-
-          unzip -t "$ARTIFACT_ZIP" >/dev/null
-
-          echo ""
-          echo "Unsigned app artifact:"
-          ls -lh "$ARTIFACT_ZIP"
-
-      - name: Upload unsigned app artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: NativeKioskAudio-unsigned-app
-          path: build/unsigned-app-artifact/HomeAssistant-unsigned-app.zip
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      # =====================================================================
-      # Xcode-Buildlog immer bereitstellen
-      # =====================================================================
-
-      - name: Upload Xcode build log
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: NativeKioskAudio-xcodebuild-log
-          path: build/xcodebuild.log
-          if-no-files-found: ignore
-          retention-days: 7
-          overwrite: true
-
-  sign:
-    name: Sign and verify kiosk IPA
-    needs: build
-    runs-on: macos-26
-    timeout-minutes: 25
-
-    steps:
-      # =====================================================================
-      # Build-Ergebnis aus demselben Workflow-Run wiederherstellen
-      #
-      # Bei "Re-run failed jobs" wird der erfolgreiche Build-Job NICHT
-      # erneut ausgefuehrt. Dieser Job verwendet dann erneut dessen Artifact.
-      # =====================================================================
-
-      - name: Download unsigned app artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: NativeKioskAudio-unsigned-app
-          path: build/input
-
-      - name: Extract unsigned app artifact
-        id: unsigned_app
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ARCHIVE="$PWD/build/input/HomeAssistant-unsigned-app.zip"
-          EXTRACT_DIR="$PWD/build/unsigned-app-extracted"
-
-          if [ ! -s "$ARCHIVE" ]; then
-            echo "::error::Unsigned app artifact archive not found:"
-            echo "$ARCHIVE"
-            exit 1
-          fi
-
-          rm -rf "$EXTRACT_DIR"
-          mkdir -p "$EXTRACT_DIR"
-
-          echo "Testing downloaded archive..."
-          unzip -t "$ARCHIVE" >/dev/null
-
-          echo "Extracting unsigned application with ditto..."
-
-          ditto \
-            -x \
-            -k \
-            "$ARCHIVE" \
-            "$EXTRACT_DIR"
-
-          APP_PATH="$(
-            find "$EXTRACT_DIR" \
-              -maxdepth 2 \
-              -type d \
-              -name 'Home Assistant*.app' \
-              -print \
-              -quit
-          )"
-
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Home Assistant .app not found after artifact extraction"
-            find "$EXTRACT_DIR" -maxdepth 3 -print || true
-            exit 1
-          fi
-
-          INFO_PLIST="$APP_PATH/Info.plist"
-
-          if [ ! -f "$INFO_PLIST" ]; then
-            echo "::error::Info.plist missing from restored .app"
-            exit 1
-          fi
-
-          EXECUTABLE="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleExecutable' \
-              "$INFO_PLIST"
-          )"
-
-          if [ -z "$EXECUTABLE" ] || [ ! -x "$APP_PATH/$EXECUTABLE" ]; then
-            echo "::error::Restored executable is missing or lost executable permissions"
-            echo "Executable: $EXECUTABLE"
-            ls -la "$APP_PATH" || true
-            exit 1
-          fi
-
-          echo "Restored unsigned application:"
-          echo "  $APP_PATH"
-          echo ""
-          echo "Executable:"
-          ls -lh "$APP_PATH/$EXECUTABLE"
-
-          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
-
-      # =====================================================================
-      # Signierte Kiosk-IPA erstellen
-      #
-      # Der Xcode-Build bleibt bewusst unsigned. Anschliessend wird das
-      # fertige App-Bundle fuer den Kiosk reduziert und mit unseren eigenen
-      # Development-Profilen signiert.
-      #
-      # Behalten:
-      #   - Haupt-App
-      #   - Notification Service Extension (Remote Push)
-      #   - Frameworks / Libraries / Resources
-      #
-      # Entfernen:
-      #   - Watch
-      #   - Widgets
-      #   - Share / Intents / Matter / PushProvider / sonstige Extensions
-      #
-      # Endgueltige IDs:
-      #   App:
-      #     de.weber-schubert.homeassistant.kiosk
-      #
-      #   Notification Service:
-      #     de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
-      #
-      #   App Group:
-      #     group.de.weber-schubert.homeassistant.kiosk
-      # =====================================================================
-
-      - name: Create signed kiosk IPA
-        id: sign_ipa
+          echo "Kiosk build settings:"
+          cat Configuration/HomeAssistant.overrides.xcconfig
+
+      # -------------------------------------------------------------------
+      # Import certificate and profiles before Xcode builds.
+      # Xcode 16+ uses ~/Library/Developer/Xcode/UserData/Provisioning Profiles.
+      # We also populate the legacy cache path for compatibility.
+      # -------------------------------------------------------------------
+      - name: Install signing material
+        id: signing
         shell: bash
         env:
           IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
@@ -556,1196 +213,473 @@ jobs:
         run: |
           set -euo pipefail
 
-          MAIN_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk"
-          NOTIFICATION_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk.APNSAttachmentService"
-          APP_GROUP_ID="group.de.weber-schubert.homeassistant.kiosk"
-
-          APP_PATH="${{ steps.unsigned_app.outputs.app_path }}"
-
-          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Restored unsigned Home Assistant application bundle not found:"
-            echo "$APP_PATH"
-            exit 1
-          fi
-
-          for required_name in \
-            IOS_CERTIFICATE_P12_BASE64 \
-            IOS_CERTIFICATE_PASSWORD \
-            IOS_MAIN_PROFILE_BASE64 \
-            IOS_NOTIFICATION_PROFILE_BASE64
+          for name in             IOS_CERTIFICATE_P12_BASE64             IOS_CERTIFICATE_PASSWORD             IOS_MAIN_PROFILE_BASE64             IOS_NOTIFICATION_PROFILE_BASE64
           do
-            if [ -z "${!required_name:-}" ]; then
-              echo "::error::GitHub secret $required_name is missing or empty"
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub secret $name is missing or empty"
               exit 1
             fi
           done
 
-          SIGN_DIR="$PWD/build/signing"
-          IPA_DIR="$PWD/build/ipa"
-          PAYLOAD_DIR="$IPA_DIR/Payload"
-          NORMALIZED_APP="$PAYLOAD_DIR/HomeAssistant.app"
+          SIGN_DIR="$RUNNER_TEMP/kiosk-signing"
+          mkdir -p "$SIGN_DIR"
 
-          P12_PATH="$SIGN_DIR/HomeAssistant-Kiosk-Development.p12"
+          P12_ORIGINAL="$SIGN_DIR/original.p12"
+          P12_PEM="$SIGN_DIR/p12.pem"
+          P12_APPLE="$SIGN_DIR/apple-compatible.p12"
           MAIN_PROFILE="$SIGN_DIR/main.mobileprovision"
-          NOTIFICATION_PROFILE="$SIGN_DIR/notification.mobileprovision"
-          MAIN_PROFILE_PLIST="$SIGN_DIR/main-profile.plist"
-          NOTIFICATION_PROFILE_PLIST="$SIGN_DIR/notification-profile.plist"
-          MAIN_ENTITLEMENTS="$SIGN_DIR/main-entitlements.plist"
-          NOTIFICATION_ENTITLEMENTS="$SIGN_DIR/notification-entitlements.plist"
+          NSE_PROFILE="$SIGN_DIR/notification.mobileprovision"
+          MAIN_PLIST="$SIGN_DIR/main.plist"
+          NSE_PLIST="$SIGN_DIR/notification.plist"
+
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | base64 -D > "$P12_ORIGINAL"
+          printf '%s' "$IOS_MAIN_PROFILE_BASE64" | base64 -D > "$MAIN_PROFILE"
+          printf '%s' "$IOS_NOTIFICATION_PROFILE_BASE64" | base64 -D > "$NSE_PROFILE"
+
+          openssl pkcs12             -in "$P12_ORIGINAL"             -passin env:IOS_CERTIFICATE_PASSWORD             -nodes             -out "$P12_PEM"
+
+          grep -Eq 'BEGIN (PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY)' "$P12_PEM"
+          grep -q 'BEGIN CERTIFICATE' "$P12_PEM"
+
+          # macOS security import is most reliable with the legacy PKCS#12 encoding.
+          openssl pkcs12             -export             -legacy             -in "$P12_PEM"             -out "$P12_APPLE"             -name "HomeAssistant Kiosk Development"             -passout env:IOS_CERTIFICATE_PASSWORD
 
           KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
-
-          IPA_PATH="$IPA_DIR/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
-
-          rm -rf "$SIGN_DIR" "$IPA_DIR"
-          mkdir -p "$SIGN_DIR" "$PAYLOAD_DIR"
-
-          echo "Decoding signing material..."
-
-          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" \
-            | /usr/bin/base64 -D \
-            > "$P12_PATH"
-
-          printf '%s' "$IOS_MAIN_PROFILE_BASE64" \
-            | /usr/bin/base64 -D \
-            > "$MAIN_PROFILE"
-
-          printf '%s' "$IOS_NOTIFICATION_PROFILE_BASE64" \
-            | /usr/bin/base64 -D \
-            > "$NOTIFICATION_PROFILE"
-
-          if [ ! -s "$P12_PATH" ] || \
-             [ ! -s "$MAIN_PROFILE" ] || \
-             [ ! -s "$NOTIFICATION_PROFILE" ]; then
-            echo "::error::One or more decoded signing files are empty"
-            exit 1
-          fi
-
-          echo ""
-          echo "Validating PKCS#12 password and contents with OpenSSL..."
-
-          P12_PEM_BUNDLE="$SIGN_DIR/p12-bundle.pem"
-          P12_APPLE_COMPAT="$SIGN_DIR/HomeAssistant-Kiosk-Development-apple-compatible.p12"
-
-          if ! openssl pkcs12 \
-            -in "$P12_PATH" \
-            -passin env:IOS_CERTIFICATE_PASSWORD \
-            -nodes \
-            -out "$P12_PEM_BUNDLE"
-          then
-            echo "::error::The P12 cannot be opened with IOS_CERTIFICATE_PASSWORD."
-            echo "::error::Please verify that the GitHub secret exactly matches the P12 export password."
-            exit 1
-          fi
-
-          if ! grep -q 'BEGIN PRIVATE KEY\|BEGIN RSA PRIVATE KEY\|BEGIN EC PRIVATE KEY' "$P12_PEM_BUNDLE"; then
-            echo "::error::The P12 does not contain a private key."
-            exit 1
-          fi
-
-          if ! grep -q 'BEGIN CERTIFICATE' "$P12_PEM_BUNDLE"; then
-            echo "::error::The P12 does not contain a certificate."
-            exit 1
-          fi
-
-          echo "Re-exporting PKCS#12 with Apple-compatible legacy algorithms..."
-
-          openssl pkcs12 \
-            -export \
-            -legacy \
-            -in "$P12_PEM_BUNDLE" \
-            -out "$P12_APPLE_COMPAT" \
-            -name "HomeAssistant Kiosk Development" \
-            -passout env:IOS_CERTIFICATE_PASSWORD
-
-          if [ ! -s "$P12_APPLE_COMPAT" ]; then
-            echo "::error::Apple-compatible P12 conversion failed"
-            exit 1
-          fi
-
-          echo "Creating temporary keychain..."
 
           security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          security import "$P12_APPLE_COMPAT" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$IOS_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
+          security import "$P12_APPLE"             -k "$KEYCHAIN_PATH"             -P "$IOS_CERTIFICATE_PASSWORD"             -T /usr/bin/codesign             -T /usr/bin/security
 
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s \
-            -k "$KEYCHAIN_PASSWORD" \
-            "$KEYCHAIN_PATH" >/dev/null
+          security set-key-partition-list             -S apple-tool:,apple:             -s             -k "$KEYCHAIN_PASSWORD"             "$KEYCHAIN_PATH" >/dev/null
 
-          security list-keychains \
-            -d user \
-            -s "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
 
-          echo ""
-          echo "Available code-signing identities:"
-
-          security find-identity \
-            -v \
-            -p codesigning \
-            "$KEYCHAIN_PATH"
-
-          SIGNING_IDENTITY="$(
-            security find-identity \
-              -v \
-              -p codesigning \
-              "$KEYCHAIN_PATH" \
-              | awk '/Apple Development/ {print $2; exit}'
+          SIGNING_SHA="$(
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"               | awk '/Apple Development/ {print $2; exit}'
           )"
 
-          if [ -z "$SIGNING_IDENTITY" ]; then
-            echo "::error::No Apple Development signing identity found in imported P12"
+          if [ -z "$SIGNING_SHA" ]; then
+            echo "::error::No Apple Development identity found"
             exit 1
           fi
 
-          echo ""
-          echo "Selected signing identity SHA-1:"
-          echo "$SIGNING_IDENTITY"
+          security cms -D -i "$MAIN_PROFILE" > "$MAIN_PLIST"
+          security cms -D -i "$NSE_PROFILE" > "$NSE_PLIST"
 
-          echo "SIGNING_CERT_SHA1=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
-
-          echo ""
-          echo "Decoding provisioning profiles..."
-
-          security cms -D -i "$MAIN_PROFILE" > "$MAIN_PROFILE_PLIST"
-          security cms -D -i "$NOTIFICATION_PROFILE" > "$NOTIFICATION_PROFILE_PLIST"
-
-          python3 - \
-            "$MAIN_PROFILE_PLIST" \
-            "$NOTIFICATION_PROFILE_PLIST" \
-            "$MAIN_ENTITLEMENTS" \
-            "$NOTIFICATION_ENTITLEMENTS" \
-            "$SIGNING_IDENTITY" \
-            "$MAIN_BUNDLE_ID" \
-            "$NOTIFICATION_BUNDLE_ID" \
-            "$APP_GROUP_ID" <<'PY'
+          python3 -             "$MAIN_PLIST"             "$NSE_PLIST"             "$SIGNING_SHA"             "$MAIN_BUNDLE_ID"             "$NOTIFICATION_BUNDLE_ID"             "$APP_GROUP_ID"             "$TEAM_ID" <<'PY'
           import datetime
           import hashlib
           import plistlib
           import sys
 
-          (
-              main_profile_path,
-              notification_profile_path,
-              main_entitlements_path,
-              notification_entitlements_path,
-              signing_identity,
-              main_bundle_id,
-              notification_bundle_id,
-              app_group_id,
-          ) = sys.argv[1:]
+          main_path, nse_path, signing_sha, main_id, nse_id, app_group, expected_team = sys.argv[1:]
 
-          def load_plist(path):
-              with open(path, "rb") as handle:
-                  return plistlib.load(handle)
+          def load(path):
+              with open(path, "rb") as f:
+                  return plistlib.load(f)
 
-          main_profile = load_plist(main_profile_path)
-          notification_profile = load_plist(notification_profile_path)
-
-          def allowed_by_profile(patterns, value):
-              for pattern in patterns:
-                  if pattern == value:
-                      return True
-                  if pattern.endswith("*") and value.startswith(pattern[:-1]):
-                      return True
-              return False
-
-          def validate_profile(profile, expected_bundle_id, require_push):
-              name = profile.get("Name", "<unnamed>")
-              entitlements = profile.get("Entitlements", {})
-              teams = profile.get("TeamIdentifier", [])
-
-              if len(teams) != 1:
-                  raise SystemExit(
-                      f"ERROR: Provisioning profile {name!r} has unexpected TeamIdentifier: {teams!r}"
-                  )
-
-              team_id = teams[0]
-              expected_application_id = f"{team_id}.{expected_bundle_id}"
-              actual_application_id = entitlements.get("application-identifier")
-
-              if actual_application_id != expected_application_id:
-                  raise SystemExit(
-                      "ERROR: Provisioning profile does not match bundle ID.\n"
-                      f"Profile: {name}\n"
-                      f"Expected application-identifier: {expected_application_id}\n"
-                      f"Actual application-identifier:   {actual_application_id}"
-                  )
-
-              expiry = profile.get("ExpirationDate")
-              if expiry is None:
-                  raise SystemExit(f"ERROR: Provisioning profile {name!r} has no ExpirationDate")
-
-              now_utc = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-              if expiry <= now_utc:
-                  raise SystemExit(
-                      f"ERROR: Provisioning profile {name!r} expired at {expiry.isoformat()} UTC"
-                  )
-
-              groups = entitlements.get("com.apple.security.application-groups", [])
-              if app_group_id not in groups:
-                  raise SystemExit(
-                      f"ERROR: Provisioning profile {name!r} does not contain App Group {app_group_id!r}"
-                  )
-
-              if require_push and entitlements.get("aps-environment") != "development":
-                  raise SystemExit(
-                      f"ERROR: Main provisioning profile {name!r} does not contain "
-                      "aps-environment=development"
-                  )
-
-              if entitlements.get("get-task-allow") is not True:
-                  raise SystemExit(
-                      f"ERROR: Provisioning profile {name!r} is not a Development profile "
-                      "(get-task-allow is not true)"
-                  )
-
-              wanted_keychain_group = f"{team_id}.{main_bundle_id}"
-              allowed_keychain_groups = entitlements.get("keychain-access-groups", [])
-
-              if not allowed_by_profile(allowed_keychain_groups, wanted_keychain_group):
-                  raise SystemExit(
-                      f"ERROR: Provisioning profile {name!r} does not authorize shared "
-                      f"keychain group {wanted_keychain_group!r}. "
-                      f"Authorized groups: {allowed_keychain_groups!r}"
-                  )
-
-              cert_fingerprints = {
+          def cert_shas(profile):
+              return [
                   hashlib.sha1(cert).hexdigest().upper()
                   for cert in profile.get("DeveloperCertificates", [])
-              }
+              ]
 
-              if signing_identity.upper() not in cert_fingerprints:
-                  available = ", ".join(sorted(cert_fingerprints)) or "<none>"
+          def validate(profile, bundle_id, require_push):
+              name = profile.get("Name", "<unnamed>")
+              team = (profile.get("TeamIdentifier") or [None])[0]
+              ent = profile.get("Entitlements", {})
+              expiry = profile.get("ExpirationDate")
+
+              if team != expected_team:
+                  raise SystemExit(f"ERROR: {name}: Team {team!r} != {expected_team!r}")
+
+              expected_app_id = f"{expected_team}.{bundle_id}"
+              if ent.get("application-identifier") != expected_app_id:
                   raise SystemExit(
-                      f"ERROR: Imported Apple Development certificate {signing_identity} "
-                      f"is not included in provisioning profile {name!r}. "
-                      f"Profile certificate SHA-1 values: {available}"
+                      f"ERROR: {name}: application-identifier mismatch: "
+                      f"{ent.get('application-identifier')!r} != {expected_app_id!r}"
                   )
 
-              print(f"Profile OK: {name}")
-              print(f"  Bundle ID: {expected_bundle_id}")
-              print(f"  Team ID:   {team_id}")
-              print(f"  Expires:   {expiry.isoformat()} UTC")
+              groups = ent.get("com.apple.security.application-groups", [])
+              if app_group not in groups:
+                  raise SystemExit(f"ERROR: {name}: missing App Group {app_group}")
 
-              return team_id, entitlements
+              keychain = ent.get("keychain-access-groups", [])
+              expected_keychain = f"{expected_team}.{main_id}"
+              if expected_keychain not in keychain:
+                  raise SystemExit(f"ERROR: {name}: missing keychain group {expected_keychain}")
 
-          main_team, main_profile_entitlements = validate_profile(
-              main_profile,
-              main_bundle_id,
-              True,
-          )
+              if require_push and ent.get("aps-environment") != "development":
+                  raise SystemExit(f"ERROR: {name}: aps-environment is not development")
 
-          notification_team, notification_profile_entitlements = validate_profile(
-              notification_profile,
-              notification_bundle_id,
-              False,
-          )
+              if not ent.get("get-task-allow", False):
+                  raise SystemExit(f"ERROR: {name}: get-task-allow is not true")
 
-          if main_team != notification_team:
-              raise SystemExit(
-                  f"ERROR: Team ID mismatch: main={main_team}, notification={notification_team}"
-              )
+              if signing_sha.upper() not in cert_shas(profile):
+                  raise SystemExit(
+                      f"ERROR: {name}: signing certificate not contained in profile; "
+                      f"profile certs={cert_shas(profile)}"
+                  )
 
-          shared_keychain_group = f"{main_team}.{main_bundle_id}"
+              if not expiry:
+                  raise SystemExit(f"ERROR: {name}: no expiration date")
 
-          main_entitlements = {
-              "application-identifier": f"{main_team}.{main_bundle_id}",
-              "com.apple.developer.team-identifier": main_team,
-              "get-task-allow": True,
-              "aps-environment": "development",
-              "com.apple.security.application-groups": [app_group_id],
-              "keychain-access-groups": [shared_keychain_group],
-          }
+              now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+              if expiry <= now:
+                  raise SystemExit(f"ERROR: {name}: profile expired at {expiry}")
 
-          notification_entitlements = {
-              "application-identifier": f"{main_team}.{notification_bundle_id}",
-              "com.apple.developer.team-identifier": main_team,
-              "get-task-allow": True,
-              "com.apple.security.application-groups": [app_group_id],
-              "keychain-access-groups": [shared_keychain_group],
-          }
+              devices = profile.get("ProvisionedDevices", [])
+              if not devices:
+                  raise SystemExit(f"ERROR: {name}: no ProvisionedDevices")
 
-          with open(main_entitlements_path, "wb") as handle:
-              plistlib.dump(main_entitlements, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+              print(f"{name}: OK")
+              print(f"  UUID: {profile.get('UUID')}")
+              print(f"  expires: {expiry}")
+              print(f"  devices: {len(devices)}")
 
-          with open(notification_entitlements_path, "wb") as handle:
-              plistlib.dump(notification_entitlements, handle, fmt=plistlib.FMT_XML, sort_keys=True)
-
-          print("")
-          print("Generated signing entitlements:")
-          print(f"  Main app:             {main_entitlements_path}")
-          print(f"  Notification service: {notification_entitlements_path}")
+          main = load(main_path)
+          nse = load(nse_path)
+          validate(main, main_id, True)
+          validate(nse, nse_id, False)
           PY
 
-          echo ""
-          echo "Preparing application payload..."
+          MAIN_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$MAIN_PLIST")"
+          NSE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$NSE_PLIST")"
 
-          ditto \
-            "$APP_PATH" \
-            "$NORMALIZED_APP"
+          CURRENT_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          LEGACY_PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
 
-          INFO_PLIST="$NORMALIZED_APP/Info.plist"
+          mkdir -p "$CURRENT_PROFILE_DIR" "$LEGACY_PROFILE_DIR"
 
-          if [ ! -f "$INFO_PLIST" ]; then
-            echo "::error::Copied Info.plist not found"
-            exit 1
-          fi
+          cp "$MAIN_PROFILE" "$CURRENT_PROFILE_DIR/$MAIN_UUID.mobileprovision"
+          cp "$NSE_PROFILE" "$CURRENT_PROFILE_DIR/$NSE_UUID.mobileprovision"
+          cp "$MAIN_PROFILE" "$LEGACY_PROFILE_DIR/$MAIN_UUID.mobileprovision"
+          cp "$NSE_PROFILE" "$LEGACY_PROFILE_DIR/$NSE_UUID.mobileprovision"
 
-          ORIGINAL_EXECUTABLE="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleExecutable' \
-              "$INFO_PLIST"
-          )"
-
-          if [ -z "$ORIGINAL_EXECUTABLE" ]; then
-            echo "::error::CFBundleExecutable is empty"
-            exit 1
-          fi
-
-          ORIGINAL_EXECUTABLE_PATH="$NORMALIZED_APP/$ORIGINAL_EXECUTABLE"
-
-          if [ ! -f "$ORIGINAL_EXECUTABLE_PATH" ]; then
-            echo "::error::Original executable not found: $ORIGINAL_EXECUTABLE_PATH"
-            exit 1
-          fi
+          echo "SIGNING_CERT_SHA1=$SIGNING_SHA" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "MAIN_PROFILE_UUID=$MAIN_UUID" >> "$GITHUB_ENV"
+          echo "NSE_PROFILE_UUID=$NSE_UUID" >> "$GITHUB_ENV"
 
           echo ""
-          echo "Checking main executable before normalization..."
-
-          if otool -L "$ORIGINAL_EXECUTABLE_PATH" \
-            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
-            echo "::error::Original executable still references a debug dylib"
-            otool -L "$ORIGINAL_EXECUTABLE_PATH"
-            exit 1
-          fi
-
-          mv \
-            "$ORIGINAL_EXECUTABLE_PATH" \
-            "$NORMALIZED_APP/HomeAssistant"
-
-          /usr/libexec/PlistBuddy \
-            -c 'Set :CFBundleExecutable HomeAssistant' \
-            "$INFO_PLIST"
-
-          /usr/libexec/PlistBuddy \
-            -c 'Set :CFBundleName HomeAssistant' \
-            "$INFO_PLIST" || true
-
-          /usr/libexec/PlistBuddy \
-            -c "Set :CFBundleIdentifier $MAIN_BUNDLE_ID" \
-            "$INFO_PLIST"
+          echo "Installed signing identity:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
           echo ""
-          echo "Removing Watch content..."
+          echo "Installed profiles:"
+          ls -l "$CURRENT_PROFILE_DIR"
 
-          rm -rf \
-            "$NORMALIZED_APP/Watch" \
-            "$NORMALIZED_APP/WatchKitSupport2"
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild             -project HomeAssistant.xcodeproj             -scheme App-Debug             -resolvePackageDependencies
 
-          echo ""
-          echo "Selecting Notification Service Extension..."
-
-          NOTIFICATION_APPEX=""
-
-          if [ ! -d "$NORMALIZED_APP/PlugIns" ]; then
-            echo "::error::PlugIns directory missing. Notification Service Extension was not embedded."
-            exit 1
-          fi
-
-          while IFS= read -r -d '' APPEX
-          do
-            APPEX_INFO="$APPEX/Info.plist"
-
-            if [ ! -f "$APPEX_INFO" ]; then
-              echo "Removing extension without Info.plist:"
-              echo "  $APPEX"
-              rm -rf "$APPEX"
-              continue
-            fi
-
-            EXTENSION_POINT="$(
-              /usr/libexec/PlistBuddy \
-                -c 'Print :NSExtension:NSExtensionPointIdentifier' \
-                "$APPEX_INFO" 2>/dev/null || true
-            )"
-
-            if [ "$EXTENSION_POINT" = "com.apple.usernotifications.service" ]; then
-              if [ -n "$NOTIFICATION_APPEX" ]; then
-                echo "::error::More than one Notification Service Extension found"
-                exit 1
-              fi
-
-              NOTIFICATION_APPEX="$APPEX"
-
-              echo "Keeping Notification Service Extension:"
-              echo "  $NOTIFICATION_APPEX"
-            else
-              echo "Removing kiosk-unneeded extension:"
-              echo "  $APPEX"
-              echo "  extension point: ${EXTENSION_POINT:-unknown}"
-              rm -rf "$APPEX"
-            fi
-          done < <(
-            find "$NORMALIZED_APP/PlugIns" \
-              -type d \
-              -name '*.appex' \
-              -prune \
-              -print0
-          )
-
-          if [ -z "$NOTIFICATION_APPEX" ] || [ ! -d "$NOTIFICATION_APPEX" ]; then
-            echo "::error::Notification Service Extension not found"
-            exit 1
-          fi
-
-          NOTIFICATION_INFO="$NOTIFICATION_APPEX/Info.plist"
-
-          /usr/libexec/PlistBuddy \
-            -c "Set :CFBundleIdentifier $NOTIFICATION_BUNDLE_ID" \
-            "$NOTIFICATION_INFO"
-
-          echo ""
-          echo "Removing any remaining nested applications..."
-
-          find "$NORMALIZED_APP" \
-            -depth \
-            -mindepth 1 \
-            -type d \
-            -name '*Watch*.app' \
-            -print \
-            -exec rm -rf {} \;
-
-          echo ""
-          echo "Verifying extension set..."
-
-          APPEX_COUNT="$(
-            find "$NORMALIZED_APP" \
-              -type d \
-              -name '*.appex' \
-              -print \
-              | wc -l \
-              | tr -d ' '
-          )"
-
-          if [ "$APPEX_COUNT" != "1" ]; then
-            echo "::error::Expected exactly one remaining app extension, found $APPEX_COUNT"
-            find "$NORMALIZED_APP" -type d -name '*.appex' -print || true
-            exit 1
-          fi
-
-          REMAINING_EXTENSION_POINT="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :NSExtension:NSExtensionPointIdentifier' \
-              "$NOTIFICATION_INFO"
-          )"
-
-          if [ "$REMAINING_EXTENSION_POINT" != "com.apple.usernotifications.service" ]; then
-            echo "::error::Remaining extension is not a Notification Service Extension"
-            exit 1
-          fi
-
-          echo ""
-          echo "Verifying Firebase configuration in built app..."
-
-          FIREBASE_PLIST="$NORMALIZED_APP/GoogleService-Info-Debug.plist"
-
-          if [ ! -f "$FIREBASE_PLIST" ]; then
-            echo "::error::GoogleService-Info-Debug.plist is missing from app bundle"
-            exit 1
-          fi
-
-          FIREBASE_BUNDLE_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :BUNDLE_ID' \
-              "$FIREBASE_PLIST"
-          )"
-
-          FIREBASE_PROJECT_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :PROJECT_ID' \
-              "$FIREBASE_PLIST"
-          )"
-
-          FIREBASE_GOOGLE_APP_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :GOOGLE_APP_ID' \
-              "$FIREBASE_PLIST"
-          )"
-
-          if [ "$FIREBASE_BUNDLE_ID" != "$MAIN_BUNDLE_ID" ]; then
-            echo "::error::Firebase BUNDLE_ID mismatch: $FIREBASE_BUNDLE_ID"
-            exit 1
-          fi
-
-          if [ "$FIREBASE_PROJECT_ID" != "homeassistant-kiosk" ]; then
-            echo "::error::Unexpected Firebase PROJECT_ID: $FIREBASE_PROJECT_ID"
-            exit 1
-          fi
-
-          echo "Firebase configuration OK:"
-          echo "  BUNDLE_ID:    $FIREBASE_BUNDLE_ID"
-          echo "  PROJECT_ID:   $FIREBASE_PROJECT_ID"
-          echo "  GOOGLE_APP_ID: $FIREBASE_GOOGLE_APP_ID"
-
-          echo ""
-          echo "Embedding provisioning profiles..."
-
-          cp \
-            "$MAIN_PROFILE" \
-            "$NORMALIZED_APP/embedded.mobileprovision"
-
-          cp \
-            "$NOTIFICATION_PROFILE" \
-            "$NOTIFICATION_APPEX/embedded.mobileprovision"
-
-          echo ""
-          echo "Removing stale signatures..."
-
-          find "$NORMALIZED_APP" \
-            -type d \
-            -name '_CodeSignature' \
-            -prune \
-            -print \
-            -exec rm -rf {} \;
-
-          echo ""
-          echo "Signing embedded dylibs..."
-
-          while IFS= read -r -d '' DYLIB
-          do
-            echo "Signing dylib:"
-            echo "  $DYLIB"
-
-            codesign \
-              --force \
-              --sign "$SIGNING_IDENTITY" \
-              --timestamp=none \
-              "$DYLIB"
-          done < <(
-            find "$NORMALIZED_APP" \
-              -type f \
-              -name '*.dylib' \
-              -print0
-          )
-
-          echo ""
-          echo "Signing embedded frameworks..."
-
-          while IFS= read -r -d '' FRAMEWORK
-          do
-            echo "Signing framework:"
-            echo "  $FRAMEWORK"
-
-            codesign \
-              --force \
-              --sign "$SIGNING_IDENTITY" \
-              --timestamp=none \
-              "$FRAMEWORK"
-          done < <(
-            find "$NORMALIZED_APP" \
-              -depth \
-              -type d \
-              -name '*.framework' \
-              -print0
-          )
-
-          echo ""
-          echo "Signing embedded XPC services..."
-
-          while IFS= read -r -d '' XPC
-          do
-            echo "Signing XPC:"
-            echo "  $XPC"
-
-            codesign \
-              --force \
-              --sign "$SIGNING_IDENTITY" \
-              --timestamp=none \
-              "$XPC"
-          done < <(
-            find "$NORMALIZED_APP" \
-              -depth \
-              -type d \
-              -name '*.xpc' \
-              -print0
-          )
-
-          echo ""
-          echo "Signing Notification Service Extension..."
-
-          codesign \
-            --force \
-            --sign "$SIGNING_IDENTITY" \
-            --entitlements "$NOTIFICATION_ENTITLEMENTS" \
-            --generate-entitlement-der \
-            --timestamp=none \
-            "$NOTIFICATION_APPEX"
-
-          echo ""
-          echo "Signing main application..."
-
-          codesign \
-            --force \
-            --sign "$SIGNING_IDENTITY" \
-            --entitlements "$MAIN_ENTITLEMENTS" \
-            --generate-entitlement-der \
-            --timestamp=none \
-            "$NORMALIZED_APP"
-
-          echo ""
-          echo "Verifying signatures before packaging..."
-          echo "Main app and Notification Service were signed with DER entitlements."
-
-          codesign \
-            --verify \
-            --deep \
-            --strict \
-            --verbose=4 \
-            "$NORMALIZED_APP"
-
-          echo ""
-          echo "Signed main-app entitlements:"
-
-          codesign \
-            -d \
-            --entitlements :- \
-            "$NORMALIZED_APP" 2>&1 \
-            | sed -n '/<?xml/,$p' \
-            | head -n 120
-
-          echo ""
-          echo "Signed notification-extension entitlements:"
-
-          codesign \
-            -d \
-            --entitlements :- \
-            "$NOTIFICATION_APPEX" 2>&1 \
-            | sed -n '/<?xml/,$p' \
-            | head -n 120
-
-          echo ""
-          echo "Creating signed IPA..."
-
-          cd "$IPA_DIR"
-
-          zip -qry \
-            "$IPA_PATH" \
-            Payload
-
-          if [ ! -f "$IPA_PATH" ]; then
-            echo "::error::Signed IPA was not created"
-            exit 1
-          fi
-
-          echo ""
-          echo "Created:"
-          ls -lh "$IPA_PATH"
-
-          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
-
-      # =====================================================================
-      # Signierte IPA erneut entpacken und endgueltig pruefen
-      # =====================================================================
-
-      - name: Verify signed kiosk IPA
+      # -------------------------------------------------------------------
+      # Xcode performs the actual signing while archiving. This avoids the
+      # post-build codesign path that iPadOS 26 rejected with 0xe8008001.
+      # -------------------------------------------------------------------
+      - name: Archive signed kiosk app with Xcode
         shell: bash
         run: |
           set -euo pipefail
 
-          MAIN_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk"
-          NOTIFICATION_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk.APNSAttachmentService"
-          APP_GROUP_ID="group.de.weber-schubert.homeassistant.kiosk"
+          mkdir -p "$PWD/build"
 
-          IPA_PATH="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
-          VERIFY_DIR="$PWD/build/ipa-verify"
+          xcodebuild             -project HomeAssistant.xcodeproj             -scheme App-Debug             -configuration Debug             -destination 'generic/platform=iOS'             -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive"             -derivedDataPath "$PWD/build/DerivedData"             ENABLE_DEBUG_DYLIB=NO             archive             | tee "$PWD/build/xcodebuild-archive.log"
 
-          rm -rf "$VERIFY_DIR"
-          mkdir -p "$VERIFY_DIR"
+      - name: Validate signed archive
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          unzip -t "$IPA_PATH"
+          ARCHIVE="$PWD/build/HomeAssistant-Kiosk.xcarchive"
 
-          unzip -q \
-            "$IPA_PATH" \
-            -d "$VERIFY_DIR"
-
-          APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
-          INFO_PLIST="$APP_PATH/Info.plist"
-
-          if [ ! -d "$APP_PATH" ] || [ ! -f "$INFO_PLIST" ]; then
-            echo "::error::Packaged HomeAssistant.app is incomplete"
-            exit 1
-          fi
-
-          EXECUTABLE="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleExecutable' \
-              "$INFO_PLIST"
+          APP="$(
+            find "$ARCHIVE/Products/Applications"               -maxdepth 1               -type d               -name '*.app'               -print               -quit
           )"
 
-          BUNDLE_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleIdentifier' \
-              "$INFO_PLIST"
-          )"
-
-          if [ "$EXECUTABLE" != "HomeAssistant" ]; then
-            echo "::error::Unexpected CFBundleExecutable: $EXECUTABLE"
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::Archived app not found"
+            find "$ARCHIVE" -maxdepth 4 -print || true
             exit 1
           fi
 
-          if [ "$BUNDLE_ID" != "$MAIN_BUNDLE_ID" ]; then
-            echo "::error::Unexpected main bundle ID: $BUNDLE_ID"
+          MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+          [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || {
+            echo "::error::Main bundle ID is $MAIN_ID"
+            exit 1
+          }
+
+          mapfile -t APPEXS < <(find "$APP/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true)
+
+          if [ "${#APPEXS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one embedded extension, found ${#APPEXS[@]}"
+            printf '%s\n' "${APPEXS[@]:-}"
             exit 1
           fi
 
-          if [ ! -x "$APP_PATH/$EXECUTABLE" ]; then
-            echo "::error::Main executable is missing or not executable"
+          NSE="${APPEXS[0]}"
+          NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
+          [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || {
+            echo "::error::Notification extension bundle ID is $NSE_ID"
             exit 1
-          fi
+          }
 
-          if otool -L "$APP_PATH/$EXECUTABLE" \
-            | grep -E '\.debug\.dylib([[:space:]]|$)' >/dev/null; then
-            echo "::error::Packaged executable references a debug dylib"
+          EXT_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$NSE/Info.plist")"
+          [ "$EXT_POINT" = "com.apple.usernotifications.service" ] || {
+            echo "::error::Unexpected extension point: $EXT_POINT"
             exit 1
-          fi
+          }
 
-          if [ -d "$APP_PATH/Watch" ] || [ -d "$APP_PATH/WatchKitSupport2" ]; then
-            echo "::error::Watch content is still present"
+          [ ! -d "$APP/Watch" ] || {
+            echo "::error::Watch content unexpectedly embedded"
             exit 1
-          fi
+          }
 
-          APPEX_COUNT="$(
-            find "$APP_PATH" \
-              -type d \
-              -name '*.appex' \
-              -print \
-              | wc -l \
-              | tr -d ' '
-          )"
-
-          if [ "$APPEX_COUNT" != "1" ]; then
-            echo "::error::Expected one app extension, found $APPEX_COUNT"
-            find "$APP_PATH" -type d -name '*.appex' -print || true
+          [ -f "$APP/GoogleService-Info-Debug.plist" ] || {
+            echo "::error::Custom Firebase plist missing"
             exit 1
-          fi
+          }
 
-          NOTIFICATION_APPEX="$(
-            find "$APP_PATH" \
-              -type d \
-              -name '*.appex' \
-              -print \
-              -quit
-          )"
+          FIREBASE_PROJECT="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$APP/GoogleService-Info-Debug.plist")"
+          FIREBASE_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' "$APP/GoogleService-Info-Debug.plist")"
 
-          NOTIFICATION_INFO="$NOTIFICATION_APPEX/Info.plist"
-
-          EXTENSION_POINT="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :NSExtension:NSExtensionPointIdentifier' \
-              "$NOTIFICATION_INFO"
-          )"
-
-          EXTENSION_BUNDLE_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleIdentifier' \
-              "$NOTIFICATION_INFO"
-          )"
-
-          if [ "$EXTENSION_POINT" != "com.apple.usernotifications.service" ]; then
-            echo "::error::Remaining extension is not the Notification Service Extension"
+          [ "$FIREBASE_PROJECT" = "homeassistant-kiosk" ] || {
+            echo "::error::Unexpected Firebase project: $FIREBASE_PROJECT"
             exit 1
-          fi
+          }
 
-          if [ "$EXTENSION_BUNDLE_ID" != "$NOTIFICATION_BUNDLE_ID" ]; then
-            echo "::error::Unexpected notification extension bundle ID: $EXTENSION_BUNDLE_ID"
+          [ "$FIREBASE_BUNDLE" = "$MAIN_BUNDLE_ID" ] || {
+            echo "::error::Firebase bundle ID mismatch: $FIREBASE_BUNDLE"
             exit 1
-          fi
+          }
 
-          if [ ! -f "$APP_PATH/embedded.mobileprovision" ]; then
-            echo "::error::Main embedded.mobileprovision missing"
-            exit 1
-          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
-          if [ ! -f "$NOTIFICATION_APPEX/embedded.mobileprovision" ]; then
-            echo "::error::Notification embedded.mobileprovision missing"
-            exit 1
-          fi
+          codesign -d --entitlements :- "$APP" > "$PWD/build/main-entitlements.plist" 2>/dev/null
+          codesign -d --entitlements :- "$NSE" > "$PWD/build/nse-entitlements.plist" 2>/dev/null
 
-          FIREBASE_PLIST="$APP_PATH/GoogleService-Info-Debug.plist"
-
-          if [ ! -f "$FIREBASE_PLIST" ]; then
-            echo "::error::Firebase plist missing"
-            exit 1
-          fi
-
-          FIREBASE_BUNDLE_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :BUNDLE_ID' \
-              "$FIREBASE_PLIST"
-          )"
-
-          FIREBASE_PROJECT_ID="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :PROJECT_ID' \
-              "$FIREBASE_PLIST"
-          )"
-
-          if [ "$FIREBASE_BUNDLE_ID" != "$MAIN_BUNDLE_ID" ] || \
-             [ "$FIREBASE_PROJECT_ID" != "homeassistant-kiosk" ]; then
-            echo "::error::Packaged Firebase configuration is incorrect"
-            exit 1
-          fi
-
-          echo ""
-          echo "Verifying packaged code signature..."
-
-          codesign \
-            --verify \
-            --deep \
-            --strict \
-            --verbose=4 \
-            "$APP_PATH"
-
-          MAIN_SIGNED_ENTITLEMENTS="$VERIFY_DIR/main-signed-entitlements.plist"
-          NOTIFICATION_SIGNED_ENTITLEMENTS="$VERIFY_DIR/notification-signed-entitlements.plist"
-
-          codesign \
-            -d \
-            --entitlements :- \
-            "$APP_PATH" \
-            > "$MAIN_SIGNED_ENTITLEMENTS" 2>/dev/null
-
-          codesign \
-            -d \
-            --entitlements :- \
-            "$NOTIFICATION_APPEX" \
-            > "$NOTIFICATION_SIGNED_ENTITLEMENTS" 2>/dev/null
-
-          python3 - \
-            "$MAIN_SIGNED_ENTITLEMENTS" \
-            "$NOTIFICATION_SIGNED_ENTITLEMENTS" \
-            "$MAIN_BUNDLE_ID" \
-            "$NOTIFICATION_BUNDLE_ID" \
-            "$APP_GROUP_ID" <<'PY'
+          python3 -             "$PWD/build/main-entitlements.plist"             "$PWD/build/nse-entitlements.plist"             "$MAIN_BUNDLE_ID"             "$NOTIFICATION_BUNDLE_ID"             "$APP_GROUP_ID"             "$TEAM_ID" <<'PY'
           import plistlib
           import sys
 
-          (
-              main_path,
-              notification_path,
-              main_bundle_id,
-              notification_bundle_id,
-              app_group_id,
-          ) = sys.argv[1:]
+          main_path, nse_path, main_id, nse_id, app_group, team = sys.argv[1:]
 
-          with open(main_path, "rb") as handle:
-              main = plistlib.load(handle)
+          def load(path):
+              with open(path, "rb") as f:
+                  return plistlib.load(f)
 
-          with open(notification_path, "rb") as handle:
-              notification = plistlib.load(handle)
+          main = load(main_path)
+          nse = load(nse_path)
 
-          main_application_id = main.get("application-identifier", "")
-          notification_application_id = notification.get("application-identifier", "")
+          checks = [
+              (main.get("application-identifier") == f"{team}.{main_id}", "main application-identifier"),
+              (main.get("com.apple.developer.team-identifier") == team, "main team identifier"),
+              (main.get("aps-environment") == "development", "main aps-environment"),
+              (app_group in main.get("com.apple.security.application-groups", []), "main App Group"),
+              (f"{team}.{main_id}" in main.get("keychain-access-groups", []), "main keychain group"),
+              (nse.get("application-identifier") == f"{team}.{nse_id}", "NSE application-identifier"),
+              (app_group in nse.get("com.apple.security.application-groups", []), "NSE App Group"),
+              (f"{team}.{main_id}" in nse.get("keychain-access-groups", []), "NSE keychain group"),
+          ]
 
-          if not main_application_id.endswith("." + main_bundle_id):
-              raise SystemExit(
-                  f"ERROR: Main application-identifier is wrong: {main_application_id}"
-              )
+          failed = [name for ok, name in checks if not ok]
+          if failed:
+              raise SystemExit("ERROR: Signed entitlement verification failed: " + ", ".join(failed))
 
-          if not notification_application_id.endswith("." + notification_bundle_id):
-              raise SystemExit(
-                  "ERROR: Notification application-identifier is wrong: "
-                  f"{notification_application_id}"
-              )
-
-          if main.get("aps-environment") != "development":
-              raise SystemExit(
-                  f"ERROR: aps-environment is not development: {main.get('aps-environment')!r}"
-              )
-
-          if app_group_id not in main.get("com.apple.security.application-groups", []):
-              raise SystemExit("ERROR: Main app group entitlement is missing")
-
-          if app_group_id not in notification.get("com.apple.security.application-groups", []):
-              raise SystemExit("ERROR: Notification extension app group entitlement is missing")
-
-          main_keychain = main.get("keychain-access-groups", [])
-          notification_keychain = notification.get("keychain-access-groups", [])
-
-          if main_keychain != notification_keychain or len(main_keychain) != 1:
-              raise SystemExit(
-                  "ERROR: Main app and Notification Service do not use the same keychain group"
-              )
-
-          print("Signed entitlements verified:")
-          print(f"  Main application-identifier: {main_application_id}")
-          print(f"  Extension application-identifier: {notification_application_id}")
-          print(f"  APNs environment: {main['aps-environment']}")
-          print(f"  App Group: {app_group_id}")
-          print(f"  Shared Keychain Group: {main_keychain[0]}")
+          print("Signed entitlements verified.")
           PY
 
-          echo ""
-          echo "============================================================"
-          echo "SIGNED KIOSK IPA VERIFICATION SUCCESSFUL"
-          echo "============================================================"
-          echo ""
-          echo "Main bundle:"
-          echo "  $MAIN_BUNDLE_ID"
-          echo ""
-          echo "Notification Service:"
-          echo "  $NOTIFICATION_BUNDLE_ID"
-          echo ""
-          echo "Firebase project:"
-          echo "  homeassistant-kiosk"
-          echo ""
-          echo "APNs:"
-          echo "  development"
-          echo ""
-          echo "App Group:"
-          echo "  $APP_GROUP_ID"
-          echo ""
-          echo "The IPA is signed and ready for installation on a device"
-          echo "included in the Development provisioning profiles."
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+          echo "NSE_PATH=$NSE" >> "$GITHUB_ENV"
 
-      # =====================================================================
-      # Produktions-Manifest + GitHub Job Summary
-      #
-      # Keine Secrets werden ausgegeben. Dokumentiert werden nur die
-      # tatsaechlich in der fertigen IPA enthaltenen IDs, Profile,
-      # Entitlements und der Fingerprint des verwendeten Zertifikats.
-      # =====================================================================
+          echo ""
+          echo "Archived app:"
+          echo "$APP"
 
-      - name: Write signed IPA build summary
+          echo ""
+          echo "Main signature:"
+          codesign -dvvv "$APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=' || true
+
+          echo ""
+          echo "Notification Service signature:"
+          codesign -dvvv "$NSE" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=' || true
+
+      # -------------------------------------------------------------------
+      # Use Xcode's distribution pipeline as well. Xcode 26 uses the
+      # "debugging" export method (the old "development" name is deprecated).
+      # -------------------------------------------------------------------
+      - name: Export development IPA with Xcode
         shell: bash
         run: |
           set -euo pipefail
 
-          VERIFY_DIR="$PWD/build/ipa-verify"
-          APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
-          INFO_PLIST="$APP_PATH/Info.plist"
-          FIREBASE_PLIST="$APP_PATH/GoogleService-Info-Debug.plist"
+          EXPORT_OPTIONS="$PWD/build/ExportOptions.plist"
+          EXPORT_DIR="$PWD/build/export"
 
-          NOTIFICATION_APPEX="$(
-            find "$APP_PATH" \
-              -type d \
-              -name '*.appex' \
-              -print \
-              -quit
-          )"
+          cat > "$EXPORT_OPTIONS" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>destination</key>
+    <string>export</string>
+    <key>method</key>
+    <string>debugging</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>signingCertificate</key>
+    <string>Apple Development</string>
+    <key>teamID</key>
+    <string>$TEAM_ID</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>$MAIN_BUNDLE_ID</key>
+        <string>HomeAssistant Kiosk Development</string>
+        <key>$NOTIFICATION_BUNDLE_ID</key>
+        <string>HomeAssistant Kiosk NotificationService Development</string>
+    </dict>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+    <key>stripSwiftSymbols</key>
+    <false/>
+</dict>
+</plist>
+EOF
 
-          if [ -z "$NOTIFICATION_APPEX" ] || [ ! -d "$NOTIFICATION_APPEX" ]; then
-            echo "::error::Notification Service Extension missing while creating build summary"
+          rm -rf "$EXPORT_DIR"
+
+          xcodebuild             -exportArchive             -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive"             -exportPath "$EXPORT_DIR"             -exportOptionsPlist "$EXPORT_OPTIONS"             | tee "$PWD/build/xcodebuild-export.log"
+
+          IPA_SOURCE="$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+
+          if [ -z "$IPA_SOURCE" ] || [ ! -s "$IPA_SOURCE" ]; then
+            echo "::error::Xcode did not export an IPA"
+            find "$EXPORT_DIR" -maxdepth 2 -print || true
             exit 1
           fi
 
-          NOTIFICATION_INFO="$NOTIFICATION_APPEX/Info.plist"
+          mkdir -p "$PWD/build/ipa"
+          cp "$IPA_SOURCE" "$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
 
-          MAIN_PROFILE_PLIST="$VERIFY_DIR/main-profile-summary.plist"
-          NOTIFICATION_PROFILE_PLIST="$VERIFY_DIR/notification-profile-summary.plist"
-          MAIN_ENTITLEMENTS="$VERIFY_DIR/main-entitlements-summary.plist"
-          NOTIFICATION_ENTITLEMENTS="$VERIFY_DIR/notification-entitlements-summary.plist"
+          echo "IPA_PATH=$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa" >> "$GITHUB_ENV"
 
-          security cms \
-            -D \
-            -i "$APP_PATH/embedded.mobileprovision" \
-            > "$MAIN_PROFILE_PLIST"
+      - name: Verify exported IPA and write build info
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          security cms \
-            -D \
-            -i "$NOTIFICATION_APPEX/embedded.mobileprovision" \
-            > "$NOTIFICATION_PROFILE_PLIST"
+          VERIFY="$PWD/build/ipa-verify"
+          rm -rf "$VERIFY"
+          mkdir -p "$VERIFY"
 
-          codesign \
-            -d \
-            --entitlements :- \
-            "$APP_PATH" \
-            > "$MAIN_ENTITLEMENTS" 2>/dev/null
+          unzip -q "$IPA_PATH" -d "$VERIFY"
 
-          codesign \
-            -d \
-            --entitlements :- \
-            "$NOTIFICATION_APPEX" \
-            > "$NOTIFICATION_ENTITLEMENTS" 2>/dev/null
+          APP="$(find "$VERIFY/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$APP" ] && [ -d "$APP" ] || {
+            echo "::error::No .app in exported IPA"
+            exit 1
+          }
 
-          MANIFEST="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt"
+          MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+          [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || exit 1
 
-          python3 - \
-            "$INFO_PLIST" \
-            "$FIREBASE_PLIST" \
-            "$NOTIFICATION_INFO" \
-            "$MAIN_PROFILE_PLIST" \
-            "$NOTIFICATION_PROFILE_PLIST" \
-            "$MAIN_ENTITLEMENTS" \
-            "$NOTIFICATION_ENTITLEMENTS" \
-            "$MANIFEST" \
-            "$GITHUB_STEP_SUMMARY" \
-            "$SIGNING_CERT_SHA1" \
-            "$GITHUB_SHA" \
-            "$GITHUB_REF_NAME" \
-            "$GITHUB_RUN_ID" \
-            "$GITHUB_RUN_ATTEMPT" <<'PY'
+          mapfile -t APPEXS < <(find "$APP/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true)
+          [ "${#APPEXS[@]}" -eq 1 ] || {
+            echo "::error::Exported IPA contains ${#APPEXS[@]} extensions instead of 1"
+            exit 1
+          }
+
+          NSE="${APPEXS[0]}"
+          NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
+          [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || exit 1
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          MAIN_PROFILE="$PWD/build/export-main-profile.plist"
+          NSE_PROFILE="$PWD/build/export-nse-profile.plist"
+          MAIN_ENT="$PWD/build/export-main-entitlements.plist"
+          NSE_ENT="$PWD/build/export-nse-entitlements.plist"
+
+          security cms -D -i "$APP/embedded.mobileprovision" > "$MAIN_PROFILE"
+          security cms -D -i "$NSE/embedded.mobileprovision" > "$NSE_PROFILE"
+          codesign -d --entitlements :- "$APP" > "$MAIN_ENT" 2>/dev/null
+          codesign -d --entitlements :- "$NSE" > "$NSE_ENT" 2>/dev/null
+
+          BUILD_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt"
+
+          python3 -             "$APP/Info.plist"             "$APP/GoogleService-Info-Debug.plist"             "$MAIN_PROFILE"             "$NSE_PROFILE"             "$MAIN_ENT"             "$NSE_ENT"             "$BUILD_INFO"             "$GITHUB_STEP_SUMMARY"             "$SIGNING_CERT_SHA1"             "$GITHUB_SHA"             "$GITHUB_REF_NAME"             "$GITHUB_RUN_ID"             "$GITHUB_RUN_ATTEMPT" <<'PY'
           import datetime
           import plistlib
           import sys
 
           (
-              info_path,
-              firebase_path,
-              notification_info_path,
-              main_profile_path,
-              notification_profile_path,
-              main_entitlements_path,
-              notification_entitlements_path,
-              manifest_path,
-              summary_path,
-              cert_sha1,
-              git_sha,
-              git_branch,
-              run_id,
-              run_attempt,
+              info_path, firebase_path, main_profile_path, nse_profile_path,
+              main_ent_path, nse_ent_path, build_info_path, summary_path,
+              cert_sha, git_sha, branch, run_id, run_attempt
           ) = sys.argv[1:]
 
-          def load_plist(path):
-              with open(path, "rb") as handle:
-                  return plistlib.load(handle)
+          def load(path):
+              with open(path, "rb") as f:
+                  return plistlib.load(f)
 
-          info = load_plist(info_path)
-          firebase = load_plist(firebase_path)
-          notification_info = load_plist(notification_info_path)
-          main_profile = load_plist(main_profile_path)
-          notification_profile = load_plist(notification_profile_path)
-          main_entitlements = load_plist(main_entitlements_path)
-          notification_entitlements = load_plist(notification_entitlements_path)
-
-          def iso_utc(value):
+          def fmt_date(value):
               if value is None:
                   return "<missing>"
               if value.tzinfo is None:
                   value = value.replace(tzinfo=datetime.UTC)
               return value.astimezone(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-          main_bundle_id = info.get("CFBundleIdentifier", "<missing>")
-          notification_bundle_id = notification_info.get("CFBundleIdentifier", "<missing>")
-          app_version = info.get("CFBundleShortVersionString", "<missing>")
-          app_build = info.get("CFBundleVersion", "<missing>")
+          info = load(info_path)
+          firebase = load(firebase_path)
+          main_profile = load(main_profile_path)
+          nse_profile = load(nse_profile_path)
+          main_ent = load(main_ent_path)
+          nse_ent = load(nse_ent_path)
 
-          firebase_project = firebase.get("PROJECT_ID", "<missing>")
-          firebase_app_id = firebase.get("GOOGLE_APP_ID", "<missing>")
-          firebase_sender_id = firebase.get("GCM_SENDER_ID", "<missing>")
+          data = {
+              "Git branch": branch,
+              "Git commit": git_sha,
+              "GitHub run": f"{run_id} attempt {run_attempt}",
+              "App version": f"{info.get('CFBundleShortVersionString', '<missing>')} ({info.get('CFBundleVersion', '<missing>')})",
+              "Main bundle ID": info.get("CFBundleIdentifier", "<missing>"),
+              "Firebase project": firebase.get("PROJECT_ID", "<missing>"),
+              "Firebase app ID": firebase.get("GOOGLE_APP_ID", "<missing>"),
+              "Apple Team ID": main_ent.get("com.apple.developer.team-identifier", "<missing>"),
+              "Signing certificate SHA-1": cert_sha,
+              "APNs environment": main_ent.get("aps-environment", "<missing>"),
+              "App Group": ", ".join(main_ent.get("com.apple.security.application-groups", [])),
+              "Keychain Group": ", ".join(main_ent.get("keychain-access-groups", [])),
+              "Main profile": main_profile.get("Name", "<missing>"),
+              "Main profile UUID": main_profile.get("UUID", "<missing>"),
+              "Main profile expires": fmt_date(main_profile.get("ExpirationDate")),
+              "Notification profile": nse_profile.get("Name", "<missing>"),
+              "Notification profile UUID": nse_profile.get("UUID", "<missing>"),
+              "Notification profile expires": fmt_date(nse_profile.get("ExpirationDate")),
+              "Signing pipeline": "Xcode archive + Xcode exportArchive",
+              "Verification": "SUCCESS",
+          }
 
-          apns_environment = main_entitlements.get("aps-environment", "<missing>")
-          app_groups = main_entitlements.get("com.apple.security.application-groups", [])
-          keychain_groups = main_entitlements.get("keychain-access-groups", [])
-          team_id = main_entitlements.get("com.apple.developer.team-identifier", "<missing>")
+          with open(build_info_path, "w", encoding="utf-8") as f:
+              f.write("HomeAssistant Native Kiosk Audio - Build Information\n")
+              f.write("===================================================\n\n")
+              for key, value in data.items():
+                  f.write(f"{key + ':':30} {value}\n")
 
-          main_profile_name = main_profile.get("Name", "<missing>")
-          main_profile_uuid = main_profile.get("UUID", "<missing>")
-          main_profile_expiry = iso_utc(main_profile.get("ExpirationDate"))
+          with open(summary_path, "a", encoding="utf-8") as f:
+              f.write("## ✅ Xcode-signed Native Kiosk Audio IPA\n\n")
+              f.write("| Check | Value |\n|---|---|\n")
+              for key, value in data.items():
+                  f.write(f"| **{key}** | \`{value}\` |\n")
 
-          notification_profile_name = notification_profile.get("Name", "<missing>")
-          notification_profile_uuid = notification_profile.get("UUID", "<missing>")
-          notification_profile_expiry = iso_utc(notification_profile.get("ExpirationDate"))
-
-          # Final consistency checks for the report itself.
-          if notification_entitlements.get("com.apple.security.application-groups", []) != app_groups:
-              raise SystemExit(
-                  "ERROR: App Group entitlements differ between app and Notification Service"
-              )
-
-          if notification_entitlements.get("keychain-access-groups", []) != keychain_groups:
-              raise SystemExit(
-                  "ERROR: Keychain entitlements differ between app and Notification Service"
-              )
-
-          lines = [
-              "HomeAssistant Native Kiosk Audio - Build Information",
-              "===================================================",
-              "",
-              f"Git branch:                    {git_branch}",
-              f"Git commit:                    {git_sha}",
-              f"GitHub run ID:                 {run_id}",
-              f"GitHub run attempt:            {run_attempt}",
-              "",
-              f"App version:                   {app_version}",
-              f"App build:                     {app_build}",
-              f"Main bundle ID:                {main_bundle_id}",
-              f"Notification extension ID:     {notification_bundle_id}",
-              "",
-              f"Firebase project ID:           {firebase_project}",
-              f"Firebase Google App ID:        {firebase_app_id}",
-              f"Firebase GCM sender ID:        {firebase_sender_id}",
-              "",
-              f"Apple Team ID:                 {team_id}",
-              f"Signing certificate SHA-1:     {cert_sha1}",
-              f"APNs environment:              {apns_environment}",
-              f"App Group:                     {', '.join(app_groups) if app_groups else '<missing>'}",
-              f"Keychain Group:                {', '.join(keychain_groups) if keychain_groups else '<missing>'}",
-              "",
-              f"Main profile:                  {main_profile_name}",
-              f"Main profile UUID:             {main_profile_uuid}",
-              f"Main profile expires:          {main_profile_expiry}",
-              "",
-              f"Notification profile:          {notification_profile_name}",
-              f"Notification profile UUID:     {notification_profile_uuid}",
-              f"Notification profile expires:  {notification_profile_expiry}",
-              "",
-              "Verification:                   SUCCESS",
-              "",
-          ]
-
-          with open(manifest_path, "w", encoding="utf-8") as handle:
-              handle.write("\n".join(lines))
-
-          summary = f"""## ✅ Signed Native Kiosk Audio IPA
-
-          | Check | Value |
-          |---|---|
-          | **App version** | `{app_version} ({app_build})` |
-          | **Main Bundle ID** | `{main_bundle_id}` |
-          | **Notification Extension** | `{notification_bundle_id}` |
-          | **Firebase Project** | `{firebase_project}` |
-          | **Firebase App ID** | `{firebase_app_id}` |
-          | **Apple Team ID** | `{team_id}` |
-          | **Certificate SHA-1** | `{cert_sha1}` |
-          | **APNs Environment** | `{apns_environment}` |
-          | **App Group** | `{', '.join(app_groups) if app_groups else '<missing>'}` |
-          | **Keychain Group** | `{', '.join(keychain_groups) if keychain_groups else '<missing>'}` |
-          | **Main Provisioning Profile** | `{main_profile_name}` |
-          | **Main Profile Expiry** | `{main_profile_expiry}` |
-          | **Notification Profile** | `{notification_profile_name}` |
-          | **Notification Profile Expiry** | `{notification_profile_expiry}` |
-          | **Git Commit** | `{git_sha}` |
-          | **Run** | `{run_id}`, attempt `{run_attempt}` |
-          | **Verification** | **SUCCESS** |
-
-          The artifact also contains `HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt`.
-          """
-
-          with open(summary_path, "a", encoding="utf-8") as handle:
-              handle.write(summary)
-
-          print("\n".join(lines))
+          print(open(build_info_path, encoding="utf-8").read())
           PY
-
-          echo ""
-          echo "Build manifest:"
-          cat "$MANIFEST"
-
-      # =====================================================================
-      # Signierte IPA als GitHub Artifact bereitstellen
-      # =====================================================================
 
       - name: Upload signed IPA
         uses: actions/upload-artifact@v4
@@ -1756,10 +690,19 @@ jobs:
             build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
-      # =====================================================================
-      # Temporaeres Signing-Material entfernen
-      # =====================================================================
+      - name: Upload Xcode logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: NativeKioskAudio-xcode-logs
+          path: |
+            build/xcodebuild-archive.log
+            build/xcodebuild-export.log
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
 
       - name: Cleanup signing material
         if: always()
@@ -1767,13 +710,21 @@ jobs:
         run: |
           set +e
 
-          KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-signing.keychain-db"
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1
+          fi
 
-          security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          CURRENT_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          LEGACY_PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
 
-          rm -rf \
-            "$PWD/build/signing" \
-            "$PWD/build/ipa-verify"
+          if [ -n "${MAIN_PROFILE_UUID:-}" ]; then
+            rm -f "$CURRENT_PROFILE_DIR/$MAIN_PROFILE_UUID.mobileprovision"
+            rm -f "$LEGACY_PROFILE_DIR/$MAIN_PROFILE_UUID.mobileprovision"
+          fi
 
-          echo "Temporary signing material removed."
+          if [ -n "${NSE_PROFILE_UUID:-}" ]; then
+            rm -f "$CURRENT_PROFILE_DIR/$NSE_PROFILE_UUID.mobileprovision"
+            rm -f "$LEGACY_PROFILE_DIR/$NSE_PROFILE_UUID.mobileprovision"
+          fi
 
+          rm -rf "$RUNNER_TEMP/kiosk-signing"
