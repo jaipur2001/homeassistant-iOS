@@ -211,12 +211,8 @@ jobs:
           /usr/bin/plutil -lint HomeAssistant.xcodeproj/project.pbxproj
 
           echo ""
-          echo "Checking Xcode project readability..."
-          xcodebuild \
-            -project HomeAssistant.xcodeproj \
-            -list >/dev/null
-
-          echo "Xcode project parse check: OK"
+          echo "Xcode project plist syntax check: OK"
+          echo "Skipping xcodebuild -list here because it would trigger SwiftPM network resolution."
 
           echo ""
           echo "Kiosk build settings:"
@@ -419,7 +415,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild             -project HomeAssistant.xcodeproj             -scheme App-Debug             -resolvePackageDependencies
+
+          PACKAGE_DIR="$PWD/build/SourcePackages"
+          mkdir -p "$PACKAGE_DIR"
+
+          max_attempts=4
+
+          for attempt in 1 2 3 4; do
+            echo ""
+            echo "SwiftPM resolve attempt $attempt/$max_attempts..."
+
+            if xcodebuild \
+              -project HomeAssistant.xcodeproj \
+              -scheme App-Debug \
+              -clonedSourcePackagesDirPath "$PACKAGE_DIR" \
+              -resolvePackageDependencies
+            then
+              echo "Swift package resolution succeeded."
+              break
+            fi
+
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::Swift package resolution failed after $max_attempts attempts"
+              exit 1
+            fi
+
+            wait_seconds=$((attempt * 20))
+            echo "::warning::Swift package resolution failed; retrying in $wait_seconds seconds..."
+            sleep "$wait_seconds"
+          done
 
       # -------------------------------------------------------------------
       # Xcode performs the actual signing while archiving. This avoids the
@@ -432,7 +456,18 @@ jobs:
 
           mkdir -p "$PWD/build"
 
-          xcodebuild             -project HomeAssistant.xcodeproj             -scheme App-Debug             -configuration Debug             -destination 'generic/platform=iOS'             -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive"             -derivedDataPath "$PWD/build/DerivedData"             ENABLE_DEBUG_DYLIB=NO             archive             | tee "$PWD/build/xcodebuild-archive.log"
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme App-Debug \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive" \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            -clonedSourcePackagesDirPath "$PWD/build/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            ENABLE_DEBUG_DYLIB=NO \
+            archive \
+            | tee "$PWD/build/xcodebuild-archive.log"
 
       - name: Validate signed archive
         shell: bash
