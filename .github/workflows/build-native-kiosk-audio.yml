@@ -464,6 +464,48 @@ jobs:
             exit 1
           fi
 
+          echo ""
+          echo "Validating PKCS#12 password and contents with OpenSSL..."
+
+          P12_PEM_BUNDLE="$SIGN_DIR/p12-bundle.pem"
+          P12_APPLE_COMPAT="$SIGN_DIR/HomeAssistant-Kiosk-Development-apple-compatible.p12"
+
+          if ! openssl pkcs12 \
+            -in "$P12_PATH" \
+            -passin env:IOS_CERTIFICATE_PASSWORD \
+            -nodes \
+            -out "$P12_PEM_BUNDLE"
+          then
+            echo "::error::The P12 cannot be opened with IOS_CERTIFICATE_PASSWORD."
+            echo "::error::Please verify that the GitHub secret exactly matches the P12 export password."
+            exit 1
+          fi
+
+          if ! grep -q 'BEGIN PRIVATE KEY\|BEGIN RSA PRIVATE KEY\|BEGIN EC PRIVATE KEY' "$P12_PEM_BUNDLE"; then
+            echo "::error::The P12 does not contain a private key."
+            exit 1
+          fi
+
+          if ! grep -q 'BEGIN CERTIFICATE' "$P12_PEM_BUNDLE"; then
+            echo "::error::The P12 does not contain a certificate."
+            exit 1
+          fi
+
+          echo "Re-exporting PKCS#12 with Apple-compatible legacy algorithms..."
+
+          openssl pkcs12 \
+            -export \
+            -legacy \
+            -in "$P12_PEM_BUNDLE" \
+            -out "$P12_APPLE_COMPAT" \
+            -name "HomeAssistant Kiosk Development" \
+            -passout env:IOS_CERTIFICATE_PASSWORD
+
+          if [ ! -s "$P12_APPLE_COMPAT" ]; then
+            echo "::error::Apple-compatible P12 conversion failed"
+            exit 1
+          fi
+
           echo "Creating temporary keychain..."
 
           security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
@@ -471,7 +513,7 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          security import "$P12_PATH" \
+          security import "$P12_APPLE_COMPAT" \
             -k "$KEYCHAIN_PATH" \
             -P "$IOS_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
