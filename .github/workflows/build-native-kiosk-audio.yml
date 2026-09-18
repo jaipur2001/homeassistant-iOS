@@ -1482,13 +1482,13 @@ jobs:
             echo
             echo "| Check | Value |"
             echo "|---|---|"
-            echo "| Bundle ID | `$MAIN_BUNDLE_ID` |"
-            echo "| Team ID | `$TEAM_ID` |"
-            echo "| Main profile | `$MAIN_PROFILE_NAME` |"
-            echo "| Info.plist SHA-256 | `$PROBE_INFO_SHA` |"
-            echo "| Executable SHA-256 | `$PROBE_EXEC_SHA` |"
-            echo "| IPA SHA-256 | `$PROBE_IPA_SHA` |"
-            echo "| codesign verification | `SUCCESS` |"
+            printf '| Bundle ID | \`%s\` |\n' "$MAIN_BUNDLE_ID"
+            printf '| Team ID | \`%s\` |\n' "$TEAM_ID"
+            printf '| Main profile | \`%s\` |\n' "$MAIN_PROFILE_NAME"
+            printf '| Info.plist SHA-256 | \`%s\` |\n' "$PROBE_INFO_SHA"
+            printf '| Executable SHA-256 | \`%s\` |\n' "$PROBE_EXEC_SHA"
+            printf '| IPA SHA-256 | \`%s\` |\n' "$PROBE_IPA_SHA"
+            printf '| codesign verification | \`SUCCESS\` |\n'
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1796,18 +1796,23 @@ jobs:
             echo "Verification:             SUCCESS"
           } | tee "$F_INFO"
 
+          INFO_UNCHANGED="NO"
+          if [ "$ORIGINAL_INFO_SHA" = "$F_INFO_SHA" ]; then
+            INFO_UNCHANGED="YES"
+          fi
+
           {
             echo "## F - Original HA app, manually re-signed"
             echo
             echo "| Check | Value |"
             echo "|---|---|"
-            echo "| Info.plist unchanged | `$([ "$ORIGINAL_INFO_SHA" = "$F_INFO_SHA" ] && echo YES || echo NO)` |"
-            echo "| Original Info.plist SHA-256 | `$ORIGINAL_INFO_SHA` |"
-            echo "| Re-signed Info.plist SHA-256 | `$F_INFO_SHA` |"
-            echo "| Original executable SHA-256 | `$ORIGINAL_EXEC_SHA` |"
-            echo "| Re-signed executable SHA-256 | `$F_EXEC_SHA` |"
-            echo "| IPA SHA-256 | `$F_IPA_SHA` |"
-            echo "| codesign verification | `SUCCESS` |"
+            printf '| Info.plist unchanged | \`%s\` |\n' "$INFO_UNCHANGED"
+            printf '| Original Info.plist SHA-256 | \`%s\` |\n' "$ORIGINAL_INFO_SHA"
+            printf '| Re-signed Info.plist SHA-256 | \`%s\` |\n' "$F_INFO_SHA"
+            printf '| Original executable SHA-256 | \`%s\` |\n' "$ORIGINAL_EXEC_SHA"
+            printf '| Re-signed executable SHA-256 | \`%s\` |\n' "$F_EXEC_SHA"
+            printf '| IPA SHA-256 | \`%s\` |\n' "$F_IPA_SHA"
+            printf '| codesign verification | \`SUCCESS\` |\n'
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
