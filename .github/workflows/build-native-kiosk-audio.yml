@@ -173,12 +173,25 @@ jobs:
           ]
 
           for token in remove_lines:
-              matches = [line for line in source.splitlines() if token in line]
-              if not matches:
-                  raise SystemExit(f"ERROR: Project token not found: {token}")
+              lines = source.splitlines()
+
+              # Only remove references from arrays such as buildPhases/dependencies.
+              # Keep the actual PBXBuildFile/PBXTargetDependency object definitions.
+              removable = [
+                  line for line in lines
+                  if token in line and "= {" not in line
+              ]
+
+              if len(removable) != 1:
+                  raise SystemExit(
+                      f"ERROR: Expected exactly one removable project reference for {token!r}, "
+                      f"found {len(removable)}: {removable!r}"
+                  )
+
+              line_to_remove = removable[0]
               source = "\n".join(
-                  line for line in source.splitlines()
-                  if token not in line
+                  line for line in lines
+                  if line != line_to_remove
               ) + "\n"
 
           # The one extension that must remain.
@@ -192,6 +205,18 @@ jobs:
           path.write_text(source, encoding="utf-8")
           print("Project reduced to App + Notification Service for kiosk archive.")
           PY
+
+          echo ""
+          echo "Validating edited Xcode project..."
+          /usr/bin/plutil -lint HomeAssistant.xcodeproj/project.pbxproj
+
+          echo ""
+          echo "Checking Xcode project readability..."
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -list >/dev/null
+
+          echo "Xcode project parse check: OK"
 
           echo ""
           echo "Kiosk build settings:"
