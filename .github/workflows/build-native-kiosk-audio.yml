@@ -95,8 +95,10 @@ jobs:
           CODE_SIGN_STYLE_DEFAULT = Manual
           CODE_SIGN_IDENTITY = Apple Development
           
-          PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_App = HomeAssistant Kiosk Development
-          PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_Extensions_NotificationService = HomeAssistant Kiosk NotificationService Development
+          // Profile names are read from the actual .mobileprovision files later
+          // and supplied to xcodebuild as KIOSK_* build settings.
+          PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_App = $(KIOSK_MAIN_PROFILE_NAME)
+          PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_Extensions_NotificationService = $(KIOSK_NSE_PROFILE_NAME)
           
           ENABLE_CRITICAL_ALERTS_QKSPJURFCD = 0
           ENABLE_PUSH_PROVIDER_QKSPJURFCD = 0
@@ -386,6 +388,13 @@ jobs:
 
           MAIN_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$MAIN_PLIST")"
           NSE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$NSE_PLIST")"
+          MAIN_PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$MAIN_PLIST")"
+          NSE_PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$NSE_PLIST")"
+
+          if [ -z "$MAIN_PROFILE_NAME" ] || [ -z "$NSE_PROFILE_NAME" ]; then
+            echo "::error::Could not read provisioning profile names"
+            exit 1
+          fi
 
           CURRENT_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
           LEGACY_PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
@@ -402,6 +411,13 @@ jobs:
           echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           echo "MAIN_PROFILE_UUID=$MAIN_UUID" >> "$GITHUB_ENV"
           echo "NSE_PROFILE_UUID=$NSE_UUID" >> "$GITHUB_ENV"
+          echo "MAIN_PROFILE_NAME=$MAIN_PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "NSE_PROFILE_NAME=$NSE_PROFILE_NAME" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Provisioning profiles selected from secrets:"
+          echo "  Main: $MAIN_PROFILE_NAME ($MAIN_UUID)"
+          echo "  NSE:  $NSE_PROFILE_NAME ($NSE_UUID)"
 
           echo ""
           echo "Installed signing identity:"
@@ -461,6 +477,8 @@ jobs:
             BUNDLE_ID_SUFFIX=".kiosk"
             CODE_SIGN_IDENTITY="Apple Development"
             CODE_SIGN_STYLE_DEFAULT="Manual"
+            KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME"
+            KIOSK_NSE_PROFILE_NAME="$NSE_PROFILE_NAME"
           )
 
           APP_SETTINGS="$PWD/build/app-build-settings.txt"
@@ -474,10 +492,10 @@ jobs:
             -target Extensions-NotificationService \
             -showBuildSettings > "$NSE_SETTINGS"
 
-          python3 - "$APP_SETTINGS" "$NSE_SETTINGS" <<'PY'
+          python3 - "$APP_SETTINGS" "$NSE_SETTINGS" "$MAIN_PROFILE_NAME" "$NSE_PROFILE_NAME" <<'PY'
           import sys
 
-          app_path, nse_path = sys.argv[1:]
+          app_path, nse_path, main_profile_name, nse_profile_name = sys.argv[1:]
 
           def parse(path):
               values = {}
@@ -501,7 +519,7 @@ jobs:
               ),
               "app profile": (
                   app.get("PROVISIONING_PROFILE_SPECIFIER"),
-                  "HomeAssistant Kiosk Development",
+                  main_profile_name,
               ),
               "app signing style": (app.get("CODE_SIGN_STYLE"), "Manual"),
               "NSE team": (nse.get("DEVELOPMENT_TEAM"), "QKSPJURFCD"),
@@ -511,7 +529,7 @@ jobs:
               ),
               "NSE profile": (
                   nse.get("PROVISIONING_PROFILE_SPECIFIER"),
-                  "HomeAssistant Kiosk NotificationService Development",
+                  nse_profile_name,
               ),
               "NSE signing style": (nse.get("CODE_SIGN_STYLE"), "Manual"),
           }
@@ -557,6 +575,8 @@ jobs:
             BUNDLE_ID_SUFFIX=".kiosk" \
             CODE_SIGN_IDENTITY="Apple Development" \
             CODE_SIGN_STYLE_DEFAULT="Manual" \
+            KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME" \
+            KIOSK_NSE_PROFILE_NAME="$NSE_PROFILE_NAME" \
             ENABLE_DEBUG_DYLIB=NO \
             archive \
             | tee "$PWD/build/xcodebuild-archive.log"
@@ -724,9 +744,9 @@ jobs:
               <key>provisioningProfiles</key>
               <dict>
                   <key>$MAIN_BUNDLE_ID</key>
-                  <string>HomeAssistant Kiosk Development</string>
+                  <string>$MAIN_PROFILE_NAME</string>
                   <key>$NOTIFICATION_BUNDLE_ID</key>
-                  <string>HomeAssistant Kiosk NotificationService Development</string>
+                  <string>$NSE_PROFILE_NAME</string>
               </dict>
               <key>manageAppVersionAndBuildNumber</key>
               <false/>
