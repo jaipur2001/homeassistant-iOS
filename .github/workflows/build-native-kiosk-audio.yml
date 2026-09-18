@@ -89,10 +89,6 @@ jobs:
           BUNDLE_ID_PREFIX = de.weber-schubert
           BUNDLE_ID_SUFFIX = .kiosk
 
-          // The App target normally derives the icon name from BUNDLE_ID_SUFFIX.
-          // There is no AppIcon.kiosk asset; the Debug asset is AppIcon.dev.
-          ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon.dev
-          
           // Upstream uses ".HomeAssistant". Our registered App ID is lower-case.
           PRODUCT_BUNDLE_IDENTIFIER = $(BUNDLE_ID_PREFIX).homeassistant$(BUNDLE_ID_SUFFIX)$(PROVISIONING_SUFFIX)
           
@@ -154,6 +150,42 @@ jobs:
 
           path = Path("HomeAssistant.xcodeproj/project.pbxproj")
           source = path.read_text(encoding="utf-8")
+
+          # AppIcon.dev must be applied only to the App target.
+          # A command-line/global ASSETCATALOG_COMPILER_APPICON_NAME would also
+          # affect Shared-iOS and make actool look for an app icon in a framework.
+          app_debug_start_token = 'B657A9111CA646EB00121384 /* Debug */ = {'
+          app_release_start_token = 'B657A9121CA646EB00121384 /* Release */ = {'
+
+          app_debug_start = source.find(app_debug_start_token)
+          app_release_start = source.find(app_release_start_token, app_debug_start)
+
+          if app_debug_start < 0 or app_release_start < 0:
+              raise SystemExit("ERROR: Could not locate App Debug build configuration")
+
+          app_debug_block = source[app_debug_start:app_release_start]
+          original_icon_setting = (
+              'ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon${BUNDLE_ID_SUFFIX}";'
+          )
+          kiosk_icon_setting = 'ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon.dev";'
+
+          if app_debug_block.count(original_icon_setting) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one App Debug icon setting, found "
+                  f"{app_debug_block.count(original_icon_setting)}"
+              )
+
+          app_debug_block = app_debug_block.replace(
+              original_icon_setting,
+              kiosk_icon_setting,
+              1,
+          )
+
+          source = (
+              source[:app_debug_start]
+              + app_debug_block
+              + source[app_release_start:]
+          )
 
           remove_lines = [
               # Other embedded iOS extensions
@@ -479,7 +511,6 @@ jobs:
             DEVELOPMENT_TEAM="$TEAM_ID"
             BUNDLE_ID_PREFIX="de.weber-schubert"
             BUNDLE_ID_SUFFIX=".kiosk"
-            ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon.dev"
             CODE_SIGN_IDENTITY="Apple Development"
             CODE_SIGN_STYLE_DEFAULT="Manual"
             KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME"
@@ -582,7 +613,6 @@ jobs:
             DEVELOPMENT_TEAM="$TEAM_ID" \
             BUNDLE_ID_PREFIX="de.weber-schubert" \
             BUNDLE_ID_SUFFIX=".kiosk" \
-            ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon.dev" \
             CODE_SIGN_IDENTITY="Apple Development" \
             CODE_SIGN_STYLE_DEFAULT="Manual" \
             KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME" \
