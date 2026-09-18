@@ -1,4 +1,4 @@
-name: Build Xcode-Signed Native Kiosk Audio IPA
+name: Build Xcode-Signed Native Kiosk Audio A/B IPAs
 
 on:
   workflow_dispatch:
@@ -846,6 +846,45 @@ jobs:
       # Use Xcode's distribution pipeline as well. Xcode 26 uses the
       # "debugging" export method (the old "development" name is deprecated).
       # -------------------------------------------------------------------
+      # -------------------------------------------------------------------
+      # A/B diagnostic for iPadOS code-signature validation:
+      #
+      #   A = package the already signed .app from the xcarchive directly.
+      #   B = let xcodebuild -exportArchive produce the IPA.
+      #
+      # Both variants originate from the exact same archive/signing material.
+      # -------------------------------------------------------------------
+      - name: Package archive-direct IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIRECT_STAGE="$PWD/build/archive-direct"
+          DIRECT_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct.ipa"
+
+          rm -rf "$DIRECT_STAGE"
+          mkdir -p "$DIRECT_STAGE/Payload" "$PWD/build/ipa"
+
+          # Preserve the signed bundle exactly as archived. No re-signing and
+          # no plist mutation happens here.
+          /usr/bin/ditto "$APP_PATH" "$DIRECT_STAGE/Payload/HomeAssistant.app"
+
+          (
+            cd "$DIRECT_STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$DIRECT_IPA"
+          )
+
+          [ -s "$DIRECT_IPA" ] || {
+            echo "::error::Archive-direct IPA was not created"
+            exit 1
+          }
+
+          echo "ARCHIVE_DIRECT_IPA=$DIRECT_IPA" >> "$GITHUB_ENV"
+
+          echo "Archive-direct IPA:"
+          ls -lh "$DIRECT_IPA"
+          shasum -a 256 "$DIRECT_IPA"
+
       - name: Export development IPA with Xcode
         shell: bash
         run: |
@@ -853,6 +892,7 @@ jobs:
 
           EXPORT_OPTIONS="$PWD/build/ExportOptions.plist"
           EXPORT_DIR="$PWD/build/export"
+          XCODE_EXPORT_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export.ipa"
 
           cat > "$EXPORT_OPTIONS" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -886,7 +926,12 @@ jobs:
 
           rm -rf "$EXPORT_DIR"
 
-          xcodebuild             -exportArchive             -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive"             -exportPath "$EXPORT_DIR"             -exportOptionsPlist "$EXPORT_OPTIONS"             | tee "$PWD/build/xcodebuild-export.log"
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive" \
+            -exportPath "$EXPORT_DIR" \
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            | tee "$PWD/build/xcodebuild-export.log"
 
           IPA_SOURCE="$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
 
@@ -896,93 +941,118 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$PWD/build/ipa"
-          cp "$IPA_SOURCE" "$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
+          cp "$IPA_SOURCE" "$XCODE_EXPORT_IPA"
 
-          echo "IPA_PATH=$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa" >> "$GITHUB_ENV"
+          echo "XCODE_EXPORT_IPA=$XCODE_EXPORT_IPA" >> "$GITHUB_ENV"
 
-      - name: Verify exported IPA and write build info
+          echo "Xcode-export IPA:"
+          ls -lh "$XCODE_EXPORT_IPA"
+          shasum -a 256 "$XCODE_EXPORT_IPA"
+
+      - name: Verify both A/B IPAs and write comparison
         shell: bash
         run: |
           set -euo pipefail
 
-          VERIFY="$PWD/build/ipa-verify"
-          rm -rf "$VERIFY"
-          mkdir -p "$VERIFY"
+          verify_variant() {
+            local label="$1"
+            local ipa="$2"
+            local verify_dir="$3"
+            local info_file="$4"
+            local pipeline="$5"
 
-          unzip -q "$IPA_PATH" -d "$VERIFY"
+            rm -rf "$verify_dir"
+            mkdir -p "$verify_dir"
 
-          APP="$(find "$VERIFY/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          [ -n "$APP" ] && [ -d "$APP" ] || {
-            echo "::error::No .app in exported IPA"
-            exit 1
-          }
+            /usr/bin/ditto -x -k "$ipa" "$verify_dir"
 
-          MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
-          [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || exit 1
+            local app
+            app="$(find "$verify_dir/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
 
-          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
-          DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")"
-          APP_BASENAME="$(basename "$APP")"
+            [ -n "$app" ] && [ -d "$app" ] || {
+              echo "::error::$label: no .app in IPA"
+              exit 1
+            }
 
-          [ "$APP_BASENAME" = "HomeAssistant.app" ] || {
-            echo "::error::Unexpected exported app bundle name: $APP_BASENAME"
-            exit 1
-          }
+            local main_id executable display_name app_basename
+            main_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
+            executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")"
+            display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Info.plist")"
+            app_basename="$(basename "$app")"
 
-          [ "$EXECUTABLE" = "HomeAssistant" ] || {
-            echo "::error::Unexpected exported CFBundleExecutable: $EXECUTABLE"
-            exit 1
-          }
+            [ "$main_id" = "$MAIN_BUNDLE_ID" ] || {
+              echo "::error::$label: unexpected main bundle ID: $main_id"
+              exit 1
+            }
 
-          [ -f "$APP/$EXECUTABLE" ] && [ -x "$APP/$EXECUTABLE" ] || {
-            echo "::error::Exported bundle executable is missing or not executable: $APP/$EXECUTABLE"
-            find "$APP" -maxdepth 1 -type f -print || true
-            exit 1
-          }
+            [ "$app_basename" = "HomeAssistant.app" ] || {
+              echo "::error::$label: unexpected app bundle name: $app_basename"
+              exit 1
+            }
 
-          echo "Exported IPA executable check:"
-          echo "  App bundle:   $APP_BASENAME"
-          echo "  Executable:   $EXECUTABLE"
-          echo "  Display name: $DISPLAY_NAME"
+            [ "$executable" = "HomeAssistant" ] || {
+              echo "::error::$label: unexpected CFBundleExecutable: $executable"
+              exit 1
+            }
 
-          APPEX_COUNT="$(
-            find "$APP/PlugIns" \
-              -maxdepth 1 \
-              -type d \
-              -name '*.appex' \
-              -print 2>/dev/null \
-              | wc -l \
-              | tr -d ' '
-          )"
+            [ -f "$app/$executable" ] && [ -x "$app/$executable" ] || {
+              echo "::error::$label: bundle executable missing or not executable"
+              exit 1
+            }
 
-          [ "$APPEX_COUNT" -eq 1 ] || {
-            echo "::error::Exported IPA contains $APPEX_COUNT extensions instead of 1"
-            find "$APP/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true
-            exit 1
-          }
+            local appex_count nse nse_id
+            appex_count="$(
+              find "$app/PlugIns" \
+                -maxdepth 1 \
+                -type d \
+                -name '*.appex' \
+                -print 2>/dev/null \
+                | wc -l \
+                | tr -d ' '
+            )"
 
-          NSE="$(
-            find "$APP/PlugIns" \
-              -maxdepth 1 \
-              -type d \
-              -name '*.appex' \
-              -print \
-              -quit
-          )"
-          NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
-          [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || exit 1
+            [ "$appex_count" -eq 1 ] || {
+              echo "::error::$label: expected exactly one extension, found $appex_count"
+              find "$app/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true
+              exit 1
+            }
 
-          python3 - "$IPA_PATH" <<'PY'
+            nse="$(
+              find "$app/PlugIns" \
+                -maxdepth 1 \
+                -type d \
+                -name '*.appex' \
+                -print \
+                -quit
+            )"
+
+            nse_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$nse/Info.plist")"
+            [ "$nse_id" = "$NOTIFICATION_BUNDLE_ID" ] || {
+              echo "::error::$label: unexpected NSE bundle ID: $nse_id"
+              exit 1
+            }
+
+            python3 - "$ipa" "$label" <<'PY'
           import sys
           import zipfile
 
-          ipa = sys.argv[1]
+          ipa, label = sys.argv[1:3]
           expected_prefix = "Payload/HomeAssistant.app/"
           expected_executable = expected_prefix + "HomeAssistant"
 
           with zipfile.ZipFile(ipa) as archive:
-              names = [item.filename for item in archive.infolist()]
+              infos = archive.infolist()
+              names = [item.filename for item in infos]
+
+          duplicates = sorted({
+              name for name in names
+              if names.count(name) > 1
+          })
+
+          if duplicates:
+              raise SystemExit(
+                  f"ERROR: {label}: duplicate ZIP entries: {duplicates[:20]!r}"
+              )
 
           if expected_executable not in names:
               candidates = [
@@ -990,41 +1060,67 @@ jobs:
                   if name.startswith("Payload/") and name.count("/") <= 2
               ]
               raise SystemExit(
-                  "ERROR: ZIP reader cannot see expected ASCII executable "
+                  f"ERROR: {label}: ZIP reader cannot see expected executable "
                   f"{expected_executable!r}. Candidates: {candidates!r}"
               )
 
           non_ascii_bundle_entries = [
               name for name in names
               if name.startswith("Payload/")
+              and len(name.split("/", 2)) > 1
               and any(ord(ch) > 127 for ch in name.split("/", 2)[1])
           ]
 
           if non_ascii_bundle_entries:
               raise SystemExit(
-                  "ERROR: Exported IPA still contains a non-ASCII app bundle path: "
+                  f"ERROR: {label}: non-ASCII app bundle path: "
                   f"{non_ascii_bundle_entries[:5]!r}"
               )
 
-          print("ZIP executable/path validation: OK")
-          print(f"  {expected_executable}")
+          print(f"{label}: ZIP structure validation: OK")
+          print(f"  entries: {len(names)}")
+          print(f"  executable: {expected_executable}")
           PY
 
-          codesign --verify --deep --strict --verbose=2 "$APP"
+            echo ""
+            echo "=== $label: codesign verification ==="
+            codesign --verify --deep --strict --verbose=4 "$app"
 
-          MAIN_PROFILE="$PWD/build/export-main-profile.plist"
-          NSE_PROFILE="$PWD/build/export-nse-profile.plist"
-          MAIN_ENT="$PWD/build/export-main-entitlements.plist"
-          NSE_ENT="$PWD/build/export-nse-entitlements.plist"
+            local main_profile nse_profile main_ent nse_ent
+            main_profile="$verify_dir/main-profile.plist"
+            nse_profile="$verify_dir/nse-profile.plist"
+            main_ent="$verify_dir/main-entitlements.plist"
+            nse_ent="$verify_dir/nse-entitlements.plist"
 
-          security cms -D -i "$APP/embedded.mobileprovision" > "$MAIN_PROFILE"
-          security cms -D -i "$NSE/embedded.mobileprovision" > "$NSE_PROFILE"
-          codesign -d --entitlements :- "$APP" > "$MAIN_ENT" 2>/dev/null
-          codesign -d --entitlements :- "$NSE" > "$NSE_ENT" 2>/dev/null
+            security cms -D -i "$app/embedded.mobileprovision" > "$main_profile"
+            security cms -D -i "$nse/embedded.mobileprovision" > "$nse_profile"
+            codesign -d --entitlements :- "$app" > "$main_ent" 2>/dev/null
+            codesign -d --entitlements :- "$nse" > "$nse_ent" 2>/dev/null
 
-          BUILD_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt"
+            local info_sha executable_sha code_resources_sha
+            info_sha="$(shasum -a 256 "$app/Info.plist" | awk '{print $1}')"
+            executable_sha="$(shasum -a 256 "$app/$executable" | awk '{print $1}')"
+            code_resources_sha="$(shasum -a 256 "$app/_CodeSignature/CodeResources" | awk '{print $1}')"
 
-          python3 -             "$APP/Info.plist"             "$APP/GoogleService-Info-Debug.plist"             "$MAIN_PROFILE"             "$NSE_PROFILE"             "$MAIN_ENT"             "$NSE_ENT"             "$BUILD_INFO"             "$GITHUB_STEP_SUMMARY"             "$SIGNING_CERT_SHA1"             "$GITHUB_SHA"             "$GITHUB_REF_NAME"             "$GITHUB_RUN_ID"             "$GITHUB_RUN_ATTEMPT" <<'PY'
+            python3 - \
+              "$app/Info.plist" \
+              "$app/GoogleService-Info-Debug.plist" \
+              "$main_profile" \
+              "$nse_profile" \
+              "$main_ent" \
+              "$nse_ent" \
+              "$info_file" \
+              "$GITHUB_STEP_SUMMARY" \
+              "$SIGNING_CERT_SHA1" \
+              "$GITHUB_SHA" \
+              "$GITHUB_REF_NAME" \
+              "$GITHUB_RUN_ID" \
+              "$GITHUB_RUN_ATTEMPT" \
+              "$label" \
+              "$pipeline" \
+              "$info_sha" \
+              "$executable_sha" \
+              "$code_resources_sha" <<'PY'
           import datetime
           import plistlib
           import sys
@@ -1032,7 +1128,8 @@ jobs:
           (
               info_path, firebase_path, main_profile_path, nse_profile_path,
               main_ent_path, nse_ent_path, build_info_path, summary_path,
-              cert_sha, git_sha, branch, run_id, run_attempt
+              cert_sha, git_sha, branch, run_id, run_attempt, label, pipeline,
+              info_sha, executable_sha, code_resources_sha
           ) = sys.argv[1:]
 
           def load(path):
@@ -1044,35 +1141,53 @@ jobs:
                   return "<missing>"
               if value.tzinfo is None:
                   value = value.replace(tzinfo=datetime.timezone.utc)
-              return value.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+              return value.astimezone(datetime.timezone.utc).strftime(
+                  "%Y-%m-%d %H:%M:%S UTC"
+              )
 
           info = load(info_path)
           firebase = load(firebase_path)
           main_profile = load(main_profile_path)
           nse_profile = load(nse_profile_path)
           main_ent = load(main_ent_path)
-          nse_ent = load(nse_ent_path)
 
           data = {
+              "Variant": label,
               "Git branch": branch,
               "Git commit": git_sha,
               "GitHub run": f"{run_id} attempt {run_attempt}",
-              "App version": f"{info.get('CFBundleShortVersionString', '<missing>')} ({info.get('CFBundleVersion', '<missing>')})",
+              "App version": (
+                  f"{info.get('CFBundleShortVersionString', '<missing>')} "
+                  f"({info.get('CFBundleVersion', '<missing>')})"
+              ),
               "Main bundle ID": info.get("CFBundleIdentifier", "<missing>"),
               "Firebase project": firebase.get("PROJECT_ID", "<missing>"),
               "Firebase app ID": firebase.get("GOOGLE_APP_ID", "<missing>"),
-              "Apple Team ID": main_ent.get("com.apple.developer.team-identifier", "<missing>"),
+              "Apple Team ID": main_ent.get(
+                  "com.apple.developer.team-identifier", "<missing>"
+              ),
               "Signing certificate SHA-1": cert_sha,
               "APNs environment": main_ent.get("aps-environment", "<missing>"),
-              "App Group": ", ".join(main_ent.get("com.apple.security.application-groups", [])),
-              "Keychain Group": ", ".join(main_ent.get("keychain-access-groups", [])),
+              "App Group": ", ".join(
+                  main_ent.get("com.apple.security.application-groups", [])
+              ),
+              "Keychain Group": ", ".join(
+                  main_ent.get("keychain-access-groups", [])
+              ),
               "Main profile": main_profile.get("Name", "<missing>"),
               "Main profile UUID": main_profile.get("UUID", "<missing>"),
-              "Main profile expires": fmt_date(main_profile.get("ExpirationDate")),
+              "Main profile expires": fmt_date(
+                  main_profile.get("ExpirationDate")
+              ),
               "Notification profile": nse_profile.get("Name", "<missing>"),
               "Notification profile UUID": nse_profile.get("UUID", "<missing>"),
-              "Notification profile expires": fmt_date(nse_profile.get("ExpirationDate")),
-              "Signing pipeline": "Xcode archive + Xcode exportArchive",
+              "Notification profile expires": fmt_date(
+                  nse_profile.get("ExpirationDate")
+              ),
+              "Info.plist SHA-256": info_sha,
+              "Executable SHA-256": executable_sha,
+              "CodeResources SHA-256": code_resources_sha,
+              "Signing pipeline": pipeline,
               "Verification": "SUCCESS",
           }
 
@@ -1083,21 +1198,108 @@ jobs:
                   f.write(f"{key + ':':30} {value}\n")
 
           with open(summary_path, "a", encoding="utf-8") as f:
-              f.write("## ✅ Xcode-signed Native Kiosk Audio IPA\n\n")
+              f.write(f"## {label}\n\n")
               f.write("| Check | Value |\n|---|---|\n")
               for key, value in data.items():
                   f.write(f"| **{key}** | \`{value}\` |\n")
+              f.write("\n")
 
           print(open(build_info_path, encoding="utf-8").read())
           PY
+          }
 
-      - name: Upload signed IPA
+          DIRECT_VERIFY="$PWD/build/verify-archive-direct"
+          EXPORT_VERIFY="$PWD/build/verify-xcode-export"
+
+          DIRECT_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct-BUILD-INFO.txt"
+          EXPORT_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export-BUILD-INFO.txt"
+
+          verify_variant \
+            "A - Archive Direct" \
+            "$ARCHIVE_DIRECT_IPA" \
+            "$DIRECT_VERIFY" \
+            "$DIRECT_INFO" \
+            "Xcode archive -> direct Payload packaging"
+
+          verify_variant \
+            "B - Xcode Export" \
+            "$XCODE_EXPORT_IPA" \
+            "$EXPORT_VERIFY" \
+            "$EXPORT_INFO" \
+            "Xcode archive -> xcodebuild -exportArchive"
+
+          ARCHIVE_INFO_SHA="$(shasum -a 256 "$APP_PATH/Info.plist" | awk '{print $1}')"
+          DIRECT_INFO_SHA="$(shasum -a 256 "$DIRECT_VERIFY/Payload/HomeAssistant.app/Info.plist" | awk '{print $1}')"
+          EXPORT_INFO_SHA="$(shasum -a 256 "$EXPORT_VERIFY/Payload/HomeAssistant.app/Info.plist" | awk '{print $1}')"
+
+          ARCHIVE_EXEC_SHA="$(shasum -a 256 "$APP_PATH/HomeAssistant" | awk '{print $1}')"
+          DIRECT_EXEC_SHA="$(shasum -a 256 "$DIRECT_VERIFY/Payload/HomeAssistant.app/HomeAssistant" | awk '{print $1}')"
+          EXPORT_EXEC_SHA="$(shasum -a 256 "$EXPORT_VERIFY/Payload/HomeAssistant.app/HomeAssistant" | awk '{print $1}')"
+
+          COMPARISON="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-COMPARISON.txt"
+
+          {
+            echo "HomeAssistant Native Kiosk Audio - A/B Comparison"
+            echo "================================================="
+            echo
+            echo "Git commit:          $GITHUB_SHA"
+            echo "GitHub run:          $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo
+            echo "Info.plist SHA-256"
+            echo "  archive:           $ARCHIVE_INFO_SHA"
+            echo "  archive-direct:    $DIRECT_INFO_SHA"
+            echo "  xcode-export:      $EXPORT_INFO_SHA"
+            echo
+            echo "Main executable SHA-256"
+            echo "  archive:           $ARCHIVE_EXEC_SHA"
+            echo "  archive-direct:    $DIRECT_EXEC_SHA"
+            echo "  xcode-export:      $EXPORT_EXEC_SHA"
+            echo
+            echo "IPA SHA-256"
+            echo "  archive-direct:    $(shasum -a 256 "$ARCHIVE_DIRECT_IPA" | awk '{print $1}')"
+            echo "  xcode-export:      $(shasum -a 256 "$XCODE_EXPORT_IPA" | awk '{print $1}')"
+          } | tee "$COMPARISON"
+
+          [ "$ARCHIVE_INFO_SHA" = "$DIRECT_INFO_SHA" ] || {
+            echo "::error::Archive-direct packaging changed Info.plist bytes"
+            exit 1
+          }
+
+          [ "$ARCHIVE_EXEC_SHA" = "$DIRECT_EXEC_SHA" ] || {
+            echo "::error::Archive-direct packaging changed executable bytes"
+            exit 1
+          }
+
+          {
+            echo "## A/B byte comparison"
+            echo
+            echo "| File | Archive | A: Direct | B: Xcode Export |"
+            echo "|---|---|---|---|"
+            echo "| Info.plist SHA-256 | \`$ARCHIVE_INFO_SHA\` | \`$DIRECT_INFO_SHA\` | \`$EXPORT_INFO_SHA\` |"
+            echo "| HomeAssistant SHA-256 | \`$ARCHIVE_EXEC_SHA\` | \`$DIRECT_EXEC_SHA\` | \`$EXPORT_EXEC_SHA\` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload A - archive-direct IPA
         uses: actions/upload-artifact@v4
         with:
-          name: HomeAssistant-Native-Kiosk-Audio-signed
+          name: HomeAssistant-Native-Kiosk-Audio-A-archive-direct
           path: |
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa
-            build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-archive-direct-BUILD-INFO.txt
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-COMPARISON.txt
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Upload B - Xcode-export IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-B-xcode-export
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-xcode-export-BUILD-INFO.txt
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-COMPARISON.txt
           if-no-files-found: error
           retention-days: 7
           overwrite: true
