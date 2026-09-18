@@ -1700,6 +1700,128 @@ jobs:
           retention-days: 7
           overwrite: true
 
+      - name: Build F - original HA app manually re-signed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          F_ROOT="$PWD/build/ha-manual-resign"
+          F_STAGE="$F_ROOT/stage"
+          F_APP="$F_STAGE/Payload/HomeAssistant.app"
+          F_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign.ipa"
+          F_ENT="$F_ROOT/entitlements.plist"
+          F_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign-BUILD-INFO.txt"
+
+          rm -rf "$F_ROOT"
+          mkdir -p "$F_STAGE/Payload"
+
+          # Copy the archived HA app byte-for-byte first.
+          /usr/bin/ditto "$APP_PATH" "$F_APP"
+
+          # Preserve the exact effective entitlements of the original Xcode-signed app.
+          codesign -d --entitlements :- "$APP_PATH" > "$F_ENT" 2>/dev/null
+          /usr/bin/plutil -lint "$F_ENT"
+
+          ORIGINAL_INFO_SHA="$(shasum -a 256 "$APP_PATH/Info.plist" | awk '{print $1}')"
+          ORIGINAL_EXEC_SHA="$(shasum -a 256 "$APP_PATH/HomeAssistant" | awk '{print $1}')"
+
+          echo "Original Xcode signature:"
+          codesign -dvvv "$APP_PATH" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=|Timestamp=' || true
+
+          echo ""
+          echo "Original designated requirement:"
+          codesign -d -r- "$APP_PATH" 2>&1 || true
+
+          # Re-sign ONLY the outer application bundle. Nested frameworks and
+          # Notification Service keep their existing Xcode signatures.
+          codesign \
+            --force \
+            --sign "$SIGNING_CERT_SHA1" \
+            --entitlements "$F_ENT" \
+            --generate-entitlement-der \
+            --timestamp=none \
+            "$F_APP"
+
+          echo ""
+          echo "Manual outer-app signature:"
+          codesign -dvvv "$F_APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=|Timestamp=' || true
+
+          echo ""
+          echo "Manual designated requirement:"
+          codesign -d -r- "$F_APP" 2>&1 || true
+
+          codesign --verify --deep --strict --verbose=4 "$F_APP"
+
+          F_INFO_SHA="$(shasum -a 256 "$F_APP/Info.plist" | awk '{print $1}')"
+          F_EXEC_SHA="$(shasum -a 256 "$F_APP/HomeAssistant" | awk '{print $1}')"
+
+          [ "$ORIGINAL_INFO_SHA" = "$F_INFO_SHA" ] || {
+            echo "::error::Manual re-sign changed Info.plist bytes"
+            exit 1
+          }
+
+          [ "$ORIGINAL_EXEC_SHA" != "$F_EXEC_SHA" ] || {
+            echo "::warning::Executable SHA did not change after re-sign; inspect signature handling"
+          }
+
+          (
+            cd "$F_STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$F_IPA"
+          )
+
+          [ -s "$F_IPA" ] || {
+            echo "::error::F manual re-sign IPA was not created"
+            exit 1
+          }
+
+          F_IPA_SHA="$(shasum -a 256 "$F_IPA" | awk '{print $1}')"
+
+          {
+            echo "HomeAssistant F - Manual Outer-App Re-sign"
+            echo "=========================================="
+            echo
+            echo "Purpose:                  Test Xcode outer-app signature vs manual codesign"
+            echo "Git commit:               $GITHUB_SHA"
+            echo "Bundle ID:                $MAIN_BUNDLE_ID"
+            echo "Team ID:                  $TEAM_ID"
+            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
+            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
+            echo "Original Info.plist SHA:  $ORIGINAL_INFO_SHA"
+            echo "Re-signed Info.plist SHA: $F_INFO_SHA"
+            echo "Original executable SHA:  $ORIGINAL_EXEC_SHA"
+            echo "Re-signed executable SHA: $F_EXEC_SHA"
+            echo "IPA SHA-256:              $F_IPA_SHA"
+            echo "Nested code:              unchanged Xcode signatures"
+            echo "Outer app:                manually re-signed"
+            echo "Verification:             SUCCESS"
+          } | tee "$F_INFO"
+
+          {
+            echo "## F - Original HA app, manually re-signed"
+            echo
+            echo "| Check | Value |"
+            echo "|---|---|"
+            echo "| Info.plist unchanged | `$([ "$ORIGINAL_INFO_SHA" = "$F_INFO_SHA" ] && echo YES || echo NO)` |"
+            echo "| Original Info.plist SHA-256 | `$ORIGINAL_INFO_SHA` |"
+            echo "| Re-signed Info.plist SHA-256 | `$F_INFO_SHA` |"
+            echo "| Original executable SHA-256 | `$ORIGINAL_EXEC_SHA` |"
+            echo "| Re-signed executable SHA-256 | `$F_EXEC_SHA` |"
+            echo "| IPA SHA-256 | `$F_IPA_SHA` |"
+            echo "| codesign verification | `SUCCESS` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload F - original HA app manually re-signed
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-F-manual-resign
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-F-manual-resign-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
       - name: Upload A - archive-direct IPA
         uses: actions/upload-artifact@v4
         with:
