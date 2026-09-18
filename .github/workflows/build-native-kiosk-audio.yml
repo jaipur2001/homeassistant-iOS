@@ -707,12 +707,25 @@ jobs:
           }
 
           APP_BASENAME="$(basename "$APP")"
-          case "$APP_BASENAME/$EXECUTABLE" in
-            *[! -~]*)
-              echo "::error::Non-ASCII app bundle or executable name: $APP_BASENAME/$EXECUTABLE"
-              exit 1
-              ;;
-          esac
+
+          python3 - "$APP_BASENAME" "$EXECUTABLE" <<'PY'
+          import sys
+
+          app_bundle, executable = sys.argv[1:3]
+
+          for label, value in (
+              ("app bundle", app_bundle),
+              ("executable", executable),
+          ):
+              try:
+                  value.encode("ascii")
+              except UnicodeEncodeError:
+                  raise SystemExit(
+                      f"ERROR: Non-ASCII {label} name: {value!r}"
+                  )
+
+          print("ASCII bundle/executable validation: OK")
+          PY
 
           echo "Archive executable check:"
           echo "  App bundle:   $APP_BASENAME"
