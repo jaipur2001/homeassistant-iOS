@@ -1280,6 +1280,228 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build C - minimal signing probe IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROBE_ROOT="$PWD/build/signing-probe"
+          PROBE_STAGE="$PROBE_ROOT/stage"
+          PROBE_APP="$PROBE_STAGE/Payload/HomeAssistantSigningProbe.app"
+          PROBE_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe.ipa"
+          PROBE_ENT="$PROBE_ROOT/probe-entitlements.plist"
+          PROBE_SRC="$PROBE_ROOT/main.m"
+          PROBE_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe-BUILD-INFO.txt"
+
+          rm -rf "$PROBE_ROOT"
+          mkdir -p "$PROBE_APP" "$PWD/build/ipa"
+
+          cat > "$PROBE_SRC" <<'EOF'
+          #import <UIKit/UIKit.h>
+
+          @interface AppDelegate : UIResponder <UIApplicationDelegate>
+          @property (strong, nonatomic) UIWindow *window;
+          @end
+
+          @implementation AppDelegate
+
+          - (BOOL)application:(UIApplication *)application
+              didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
+          {
+              self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+
+              UIViewController *controller = [UIViewController new];
+              controller.view.backgroundColor = [UIColor systemBackgroundColor];
+
+              UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+              label.translatesAutoresizingMaskIntoConstraints = NO;
+              label.text = @"HomeAssistant Signing Probe";
+              label.textAlignment = NSTextAlignmentCenter;
+              label.numberOfLines = 0;
+              label.font = [UIFont systemFontOfSize:24 weight:UIFontWeightSemibold];
+
+              [controller.view addSubview:label];
+
+              [NSLayoutConstraint activateConstraints:@[
+                  [label.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+                  [label.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor],
+                  [label.leadingAnchor constraintGreaterThanOrEqualToAnchor:controller.view.leadingAnchor constant:24],
+                  [label.trailingAnchor constraintLessThanOrEqualToAnchor:controller.view.trailingAnchor constant:-24]
+              ]];
+
+              self.window.rootViewController = controller;
+              [self.window makeKeyAndVisible];
+              return YES;
+          }
+
+          @end
+
+          int main(int argc, char * argv[]) {
+              @autoreleasepool {
+                  return UIApplicationMain(
+                      argc,
+                      argv,
+                      nil,
+                      NSStringFromClass([AppDelegate class])
+                  );
+              }
+          }
+          EOF
+
+          cat > "$PROBE_APP/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>HA Signing Probe</string>
+              <key>CFBundleExecutable</key>
+              <string>HomeAssistantSigningProbe</string>
+              <key>CFBundleIdentifier</key>
+              <string>$MAIN_BUNDLE_ID</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>HomeAssistantSigningProbe</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>MinimumOSVersion</key>
+              <string>18.0</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+              <key>UILaunchScreen</key>
+              <dict/>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          /usr/bin/plutil -lint "$PROBE_APP/Info.plist"
+
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=18.0 \
+            -fobjc-arc \
+            -framework UIKit \
+            -framework Foundation \
+            "$PROBE_SRC" \
+            -o "$PROBE_APP/HomeAssistantSigningProbe"
+
+          chmod 755 "$PROBE_APP/HomeAssistantSigningProbe"
+
+          # Reuse the exact provisioning profile embedded in the signed HA archive.
+          cp "$APP_PATH/embedded.mobileprovision" "$PROBE_APP/embedded.mobileprovision"
+
+          # Reuse the exact effective entitlements that Xcode signed into the HA app.
+          codesign -d --entitlements :- "$APP_PATH" > "$PROBE_ENT" 2>/dev/null
+          /usr/bin/plutil -lint "$PROBE_ENT"
+
+          echo "Signing probe with identity:"
+          echo "  $SIGNING_CERT_SHA1"
+
+          codesign \
+            --force \
+            --sign "$SIGNING_CERT_SHA1" \
+            --entitlements "$PROBE_ENT" \
+            --generate-entitlement-der \
+            --timestamp=none \
+            "$PROBE_APP"
+
+          echo ""
+          echo "Probe signature:"
+          codesign -dvvv "$PROBE_APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=' || true
+
+          echo ""
+          echo "Probe entitlements:"
+          codesign -d --entitlements :- "$PROBE_APP" 2>/dev/null
+
+          codesign --verify --strict --verbose=4 "$PROBE_APP"
+
+          (
+            cd "$PROBE_STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$PROBE_IPA"
+          )
+
+          [ -s "$PROBE_IPA" ] || {
+            echo "::error::Signing probe IPA was not created"
+            exit 1
+          }
+
+          PROBE_INFO_SHA="$(shasum -a 256 "$PROBE_APP/Info.plist" | awk '{print $1}')"
+          PROBE_EXEC_SHA="$(shasum -a 256 "$PROBE_APP/HomeAssistantSigningProbe" | awk '{print $1}')"
+          PROBE_IPA_SHA="$(shasum -a 256 "$PROBE_IPA" | awk '{print $1}')"
+
+          {
+            echo "HomeAssistant Signing Probe - Build Information"
+            echo "==============================================="
+            echo
+            echo "Purpose:                  Isolate Apple signing/profile from HA bundle structure"
+            echo "Git branch:               $GITHUB_REF_NAME"
+            echo "Git commit:               $GITHUB_SHA"
+            echo "GitHub run:               $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "Bundle ID:                $MAIN_BUNDLE_ID"
+            echo "Team ID:                  $TEAM_ID"
+            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
+            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
+            echo "Info.plist SHA-256:       $PROBE_INFO_SHA"
+            echo "Executable SHA-256:       $PROBE_EXEC_SHA"
+            echo "IPA SHA-256:              $PROBE_IPA_SHA"
+            echo "Signing:                  manual codesign using exact HA effective entitlements"
+            echo "Verification:             SUCCESS"
+          } | tee "$PROBE_INFO"
+
+          {
+            echo "## C - Minimal signing probe"
+            echo
+            echo "| Check | Value |"
+            echo "|---|---|"
+            echo "| Bundle ID | `$MAIN_BUNDLE_ID` |"
+            echo "| Team ID | `$TEAM_ID` |"
+            echo "| Main profile | `$MAIN_PROFILE_NAME` |"
+            echo "| Info.plist SHA-256 | `$PROBE_INFO_SHA` |"
+            echo "| Executable SHA-256 | `$PROBE_EXEC_SHA` |"
+            echo "| IPA SHA-256 | `$PROBE_IPA_SHA` |"
+            echo "| codesign verification | `SUCCESS` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload C - minimal signing probe IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-C-signing-probe
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-C-signing-probe-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
       - name: Upload A - archive-direct IPA
         uses: actions/upload-artifact@v4
         with:
