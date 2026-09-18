@@ -181,10 +181,58 @@ jobs:
               1,
           )
 
+          # IMPORTANT:
+          # The upstream Debug product name contains the Greek Delta character:
+          #     Home Assistant Δ
+          #
+          # Xcode's exported IPA stores that path without the ZIP UTF-8 flag.
+          # Some Windows/Python ZIP readers therefore decode the UTF-8 bytes as
+          # CP437 ("╬ö"), so Sideloadly cannot match CFBundleExecutable and
+          # reports that the bundle executable is missing.
+          #
+          # Keep the on-device display name friendly, but make the actual app
+          # directory and Mach-O executable strictly ASCII.
+          original_product_name = 'PRODUCT_NAME = "Home Assistant Δ";'
+          kiosk_product_name = 'PRODUCT_NAME = HomeAssistant;'
+
+          if app_debug_block.count(original_product_name) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one App Debug PRODUCT_NAME setting, found "
+                  f"{app_debug_block.count(original_product_name)}"
+              )
+
+          app_debug_block = app_debug_block.replace(
+              original_product_name,
+              kiosk_product_name,
+              1,
+          )
+
           source = (
               source[:app_debug_start]
               + app_debug_block
               + source[app_release_start:]
+          )
+
+          # Preserve a readable SpringBoard name independently of PRODUCT_NAME.
+          info_path = Path("Sources/App/Resources/Info.plist")
+          info = info_path.read_text(encoding="utf-8")
+          old_display = (
+              "<key>CFBundleDisplayName</key>\n"
+              "\t<string>$(PRODUCT_NAME)</string>"
+          )
+          new_display = (
+              "<key>CFBundleDisplayName</key>\n"
+              "\t<string>Home Assistant Kiosk</string>"
+          )
+
+          if info.count(old_display) != 1:
+              raise SystemExit(
+                  "ERROR: Could not uniquely patch CFBundleDisplayName in Info.plist"
+              )
+
+          info_path.write_text(
+              info.replace(old_display, new_display, 1),
+              encoding="utf-8",
           )
 
           remove_lines = [
@@ -644,6 +692,33 @@ jobs:
             exit 1
           }
 
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")"
+
+          [ "$EXECUTABLE" = "HomeAssistant" ] || {
+            echo "::error::Unexpected CFBundleExecutable: $EXECUTABLE"
+            exit 1
+          }
+
+          [ -f "$APP/$EXECUTABLE" ] && [ -x "$APP/$EXECUTABLE" ] || {
+            echo "::error::Bundle executable is missing or not executable: $APP/$EXECUTABLE"
+            find "$APP" -maxdepth 1 -type f -print || true
+            exit 1
+          }
+
+          APP_BASENAME="$(basename "$APP")"
+          case "$APP_BASENAME/$EXECUTABLE" in
+            *[! -~]*)
+              echo "::error::Non-ASCII app bundle or executable name: $APP_BASENAME/$EXECUTABLE"
+              exit 1
+              ;;
+          esac
+
+          echo "Archive executable check:"
+          echo "  App bundle:   $APP_BASENAME"
+          echo "  Executable:   $EXECUTABLE"
+          echo "  Display name: $DISPLAY_NAME"
+
           APPEX_COUNT="$(
             find "$APP/PlugIns" \
               -maxdepth 1 \
@@ -833,6 +908,31 @@ jobs:
           MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
           [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || exit 1
 
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")"
+          APP_BASENAME="$(basename "$APP")"
+
+          [ "$APP_BASENAME" = "HomeAssistant.app" ] || {
+            echo "::error::Unexpected exported app bundle name: $APP_BASENAME"
+            exit 1
+          }
+
+          [ "$EXECUTABLE" = "HomeAssistant" ] || {
+            echo "::error::Unexpected exported CFBundleExecutable: $EXECUTABLE"
+            exit 1
+          }
+
+          [ -f "$APP/$EXECUTABLE" ] && [ -x "$APP/$EXECUTABLE" ] || {
+            echo "::error::Exported bundle executable is missing or not executable: $APP/$EXECUTABLE"
+            find "$APP" -maxdepth 1 -type f -print || true
+            exit 1
+          }
+
+          echo "Exported IPA executable check:"
+          echo "  App bundle:   $APP_BASENAME"
+          echo "  Executable:   $EXECUTABLE"
+          echo "  Display name: $DISPLAY_NAME"
+
           APPEX_COUNT="$(
             find "$APP/PlugIns" \
               -maxdepth 1 \
@@ -859,6 +959,43 @@ jobs:
           )"
           NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
           [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || exit 1
+
+          python3 - "$IPA_PATH" <<'PY'
+          import sys
+          import zipfile
+
+          ipa = sys.argv[1]
+          expected_prefix = "Payload/HomeAssistant.app/"
+          expected_executable = expected_prefix + "HomeAssistant"
+
+          with zipfile.ZipFile(ipa) as archive:
+              names = [item.filename for item in archive.infolist()]
+
+          if expected_executable not in names:
+              candidates = [
+                  name for name in names
+                  if name.startswith("Payload/") and name.count("/") <= 2
+              ]
+              raise SystemExit(
+                  "ERROR: ZIP reader cannot see expected ASCII executable "
+                  f"{expected_executable!r}. Candidates: {candidates!r}"
+              )
+
+          non_ascii_bundle_entries = [
+              name for name in names
+              if name.startswith("Payload/")
+              and any(ord(ch) > 127 for ch in name.split("/", 2)[1])
+          ]
+
+          if non_ascii_bundle_entries:
+              raise SystemExit(
+                  "ERROR: Exported IPA still contains a non-ASCII app bundle path: "
+                  f"{non_ascii_bundle_entries[:5]!r}"
+              )
+
+          print("ZIP executable/path validation: OK")
+          print(f"  {expected_executable}")
+          PY
 
           codesign --verify --deep --strict --verbose=2 "$APP"
 
