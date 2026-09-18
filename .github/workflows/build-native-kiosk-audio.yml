@@ -1410,6 +1410,7 @@ jobs:
             -fobjc-arc \
             -framework UIKit \
             -framework Foundation \
+            -framework CoreGraphics \
             "$PROBE_SRC" \
             -o "$PROBE_APP/HomeAssistantSigningProbe"
 
