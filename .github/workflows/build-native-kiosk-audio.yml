@@ -445,6 +445,93 @@ jobs:
             sleep "$wait_seconds"
           done
 
+      - name: Verify effective Xcode signing settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMMON_ARGS=(
+            -project HomeAssistant.xcodeproj
+            -configuration Debug
+            -sdk iphoneos
+            -clonedSourcePackagesDirPath "$PWD/build/SourcePackages"
+            -disableAutomaticPackageResolution
+            DEVELOPMENT_TEAM="$TEAM_ID"
+            BUNDLE_ID_PREFIX="de.weber-schubert"
+            BUNDLE_ID_SUFFIX=".kiosk"
+            CODE_SIGN_IDENTITY="Apple Development"
+            CODE_SIGN_STYLE_DEFAULT="Manual"
+          )
+
+          APP_SETTINGS="$PWD/build/app-build-settings.txt"
+          NSE_SETTINGS="$PWD/build/nse-build-settings.txt"
+
+          xcodebuild "${COMMON_ARGS[@]}" \
+            -target App \
+            -showBuildSettings > "$APP_SETTINGS"
+
+          xcodebuild "${COMMON_ARGS[@]}" \
+            -target Extensions-NotificationService \
+            -showBuildSettings > "$NSE_SETTINGS"
+
+          python3 - "$APP_SETTINGS" "$NSE_SETTINGS" <<'PY'
+          import sys
+
+          app_path, nse_path = sys.argv[1:]
+
+          def parse(path):
+              values = {}
+              with open(path, encoding="utf-8") as f:
+                  for raw in f:
+                      line = raw.strip()
+                      if " = " not in line:
+                          continue
+                      key, value = line.split(" = ", 1)
+                      values[key.strip()] = value.strip()
+              return values
+
+          app = parse(app_path)
+          nse = parse(nse_path)
+
+          expected = {
+              "app team": (app.get("DEVELOPMENT_TEAM"), "QKSPJURFCD"),
+              "app bundle": (
+                  app.get("PRODUCT_BUNDLE_IDENTIFIER"),
+                  "de.weber-schubert.homeassistant.kiosk",
+              ),
+              "app profile": (
+                  app.get("PROVISIONING_PROFILE_SPECIFIER"),
+                  "HomeAssistant Kiosk Development",
+              ),
+              "app signing style": (app.get("CODE_SIGN_STYLE"), "Manual"),
+              "NSE team": (nse.get("DEVELOPMENT_TEAM"), "QKSPJURFCD"),
+              "NSE bundle": (
+                  nse.get("PRODUCT_BUNDLE_IDENTIFIER"),
+                  "de.weber-schubert.homeassistant.kiosk.APNSAttachmentService",
+              ),
+              "NSE profile": (
+                  nse.get("PROVISIONING_PROFILE_SPECIFIER"),
+                  "HomeAssistant Kiosk NotificationService Development",
+              ),
+              "NSE signing style": (nse.get("CODE_SIGN_STYLE"), "Manual"),
+          }
+
+          failed = False
+          print("Effective Xcode signing settings:")
+          for label, (actual, wanted) in expected.items():
+              status = "OK" if actual == wanted else "ERROR"
+              print(f"  {status:5} {label}: {actual!r}")
+              if actual != wanted:
+                  print(f"        expected: {wanted!r}")
+                  failed = True
+
+          if failed:
+              raise SystemExit("ERROR: Effective Xcode signing settings are not kiosk-safe")
+          PY
+
+          echo ""
+          echo "Effective kiosk signing settings verified."
+
       # -------------------------------------------------------------------
       # Xcode performs the actual signing while archiving. This avoids the
       # post-build codesign path that iPadOS 26 rejected with 0xe8008001.
@@ -465,6 +552,11 @@ jobs:
             -derivedDataPath "$PWD/build/DerivedData" \
             -clonedSourcePackagesDirPath "$PWD/build/SourcePackages" \
             -disableAutomaticPackageResolution \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            BUNDLE_ID_PREFIX="de.weber-schubert" \
+            BUNDLE_ID_SUFFIX=".kiosk" \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            CODE_SIGN_STYLE_DEFAULT="Manual" \
             ENABLE_DEBUG_DYLIB=NO \
             archive \
             | tee "$PWD/build/xcodebuild-archive.log"
