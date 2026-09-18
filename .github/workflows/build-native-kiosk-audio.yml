@@ -88,6 +88,10 @@ jobs:
           DEVELOPMENT_TEAM = QKSPJURFCD
           BUNDLE_ID_PREFIX = de.weber-schubert
           BUNDLE_ID_SUFFIX = .kiosk
+
+          // The App target normally derives the icon name from BUNDLE_ID_SUFFIX.
+          // There is no AppIcon.kiosk asset; the Debug asset is AppIcon.dev.
+          ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon.dev
           
           // Upstream uses ".HomeAssistant". Our registered App ID is lower-case.
           PRODUCT_BUNDLE_IDENTIFIER = $(BUNDLE_ID_PREFIX).homeassistant$(BUNDLE_ID_SUFFIX)$(PROVISIONING_SUFFIX)
@@ -475,6 +479,7 @@ jobs:
             DEVELOPMENT_TEAM="$TEAM_ID"
             BUNDLE_ID_PREFIX="de.weber-schubert"
             BUNDLE_ID_SUFFIX=".kiosk"
+            ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon.dev"
             CODE_SIGN_IDENTITY="Apple Development"
             CODE_SIGN_STYLE_DEFAULT="Manual"
             KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME"
@@ -516,6 +521,10 @@ jobs:
               "app bundle": (
                   app.get("PRODUCT_BUNDLE_IDENTIFIER"),
                   "de.weber-schubert.homeassistant.kiosk",
+              ),
+              "app icon": (
+                  app.get("ASSETCATALOG_COMPILER_APPICON_NAME"),
+                  "AppIcon.dev",
               ),
               "app profile": (
                   app.get("PROVISIONING_PROFILE_SPECIFIER"),
@@ -573,6 +582,7 @@ jobs:
             DEVELOPMENT_TEAM="$TEAM_ID" \
             BUNDLE_ID_PREFIX="de.weber-schubert" \
             BUNDLE_ID_SUFFIX=".kiosk" \
+            ASSETCATALOG_COMPILER_APPICON_NAME="AppIcon.dev" \
             CODE_SIGN_IDENTITY="Apple Development" \
             CODE_SIGN_STYLE_DEFAULT="Manual" \
             KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME" \
