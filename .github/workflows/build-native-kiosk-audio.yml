@@ -1503,6 +1503,203 @@ jobs:
           retention-days: 7
           overwrite: true
 
+      - name: Build D - HA Info.plist probe IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          D_ROOT="$PWD/build/ha-info-probe"
+          D_STAGE="$D_ROOT/stage"
+          D_APP="$D_STAGE/Payload/HomeAssistantInfoProbe.app"
+          D_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe.ipa"
+          D_ENT="$D_ROOT/entitlements.plist"
+          D_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe-BUILD-INFO.txt"
+
+          C_APP="$PWD/build/signing-probe/stage/Payload/HomeAssistantSigningProbe.app"
+
+          [ -d "$C_APP" ] || {
+            echo "::error::C probe app not found at $C_APP"
+            exit 1
+          }
+
+          rm -rf "$D_ROOT"
+          mkdir -p "$D_STAGE/Payload"
+
+          # Start from the real archived HA bundle so all non-code resources
+          # referenced by the real Info.plist remain present.
+          /usr/bin/ditto "$APP_PATH" "$D_APP"
+
+          # Remove all executable/nested-code variables from the equation.
+          rm -rf \
+            "$D_APP/_CodeSignature" \
+            "$D_APP/Frameworks" \
+            "$D_APP/PlugIns"
+          rm -f "$D_APP/HomeAssistant"
+
+          # Use the known-good minimal probe executable from variant C.
+          cp "$C_APP/HomeAssistantSigningProbe" "$D_APP/HomeAssistantSigningProbe"
+          chmod 755 "$D_APP/HomeAssistantSigningProbe"
+
+          # Keep the real HA Info.plist byte-for-byte except for the executable
+          # name, which must point at the probe binary.
+          /usr/libexec/PlistBuddy \
+            -c 'Set :CFBundleExecutable HomeAssistantSigningProbe' \
+            "$D_APP/Info.plist"
+
+          /usr/bin/plutil -lint "$D_APP/Info.plist"
+
+          # Same profile and exact effective entitlements as the real HA app.
+          cp "$APP_PATH/embedded.mobileprovision" "$D_APP/embedded.mobileprovision"
+          codesign -d --entitlements :- "$APP_PATH" > "$D_ENT" 2>/dev/null
+
+          codesign \
+            --force \
+            --sign "$SIGNING_CERT_SHA1" \
+            --entitlements "$D_ENT" \
+            --generate-entitlement-der \
+            --timestamp=none \
+            "$D_APP"
+
+          codesign --verify --strict --verbose=4 "$D_APP"
+
+          (
+            cd "$D_STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$D_IPA"
+          )
+
+          [ -s "$D_IPA" ] || {
+            echo "::error::D HA Info.plist probe IPA was not created"
+            exit 1
+          }
+
+          D_INFO_SHA="$(shasum -a 256 "$D_APP/Info.plist" | awk '{print $1}')"
+          D_EXEC_SHA="$(shasum -a 256 "$D_APP/HomeAssistantSigningProbe" | awk '{print $1}')"
+          D_IPA_SHA="$(shasum -a 256 "$D_IPA" | awk '{print $1}')"
+
+          {
+            echo "HomeAssistant D - HA Info.plist Probe"
+            echo "====================================="
+            echo
+            echo "Purpose:                  Test real HA Info.plist/resources with known-good probe executable"
+            echo "Git commit:               $GITHUB_SHA"
+            echo "Bundle ID:                $MAIN_BUNDLE_ID"
+            echo "Team ID:                  $TEAM_ID"
+            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
+            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
+            echo "Info.plist SHA-256:       $D_INFO_SHA"
+            echo "Executable SHA-256:       $D_EXEC_SHA"
+            echo "IPA SHA-256:              $D_IPA_SHA"
+            echo "Frameworks:               REMOVED"
+            echo "PlugIns:                  REMOVED"
+            echo "Verification:             SUCCESS"
+          } | tee "$D_INFO"
+
+      - name: Upload D - HA Info.plist probe IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-D-ha-info-probe-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Build E - HA binary with minimal Info.plist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          E_ROOT="$PWD/build/ha-binary-probe"
+          E_STAGE="$E_ROOT/stage"
+          E_APP="$E_STAGE/Payload/HomeAssistantBinaryProbe.app"
+          E_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe.ipa"
+          E_ENT="$E_ROOT/entitlements.plist"
+          E_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe-BUILD-INFO.txt"
+
+          C_APP="$PWD/build/signing-probe/stage/Payload/HomeAssistantSigningProbe.app"
+
+          [ -d "$C_APP" ] || {
+            echo "::error::C probe app not found at $C_APP"
+            exit 1
+          }
+
+          rm -rf "$E_ROOT"
+          mkdir -p "$E_STAGE/Payload"
+
+          # Keep the real HA executable, Frameworks, Notification Service and
+          # all resources. Only the main app Info.plist is replaced.
+          /usr/bin/ditto "$APP_PATH" "$E_APP"
+          rm -rf "$E_APP/_CodeSignature"
+
+          cp "$C_APP/Info.plist" "$E_APP/Info.plist"
+
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable HomeAssistant' "$E_APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleName HomeAssistant' "$E_APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName HA Binary Probe' "$E_APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MAIN_BUNDLE_ID" "$E_APP/Info.plist"
+
+          /usr/bin/plutil -lint "$E_APP/Info.plist"
+
+          cp "$APP_PATH/embedded.mobileprovision" "$E_APP/embedded.mobileprovision"
+          codesign -d --entitlements :- "$APP_PATH" > "$E_ENT" 2>/dev/null
+
+          # Nested code remains byte-identical and keeps its existing valid
+          # signatures. Re-sign only the outer app so CodeResources seals the
+          # new minimal Info.plist and existing nested code.
+          codesign \
+            --force \
+            --sign "$SIGNING_CERT_SHA1" \
+            --entitlements "$E_ENT" \
+            --generate-entitlement-der \
+            --timestamp=none \
+            "$E_APP"
+
+          codesign --verify --deep --strict --verbose=4 "$E_APP"
+
+          (
+            cd "$E_STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$E_IPA"
+          )
+
+          [ -s "$E_IPA" ] || {
+            echo "::error::E HA binary probe IPA was not created"
+            exit 1
+          }
+
+          E_INFO_SHA="$(shasum -a 256 "$E_APP/Info.plist" | awk '{print $1}')"
+          E_EXEC_SHA="$(shasum -a 256 "$E_APP/HomeAssistant" | awk '{print $1}')"
+          E_IPA_SHA="$(shasum -a 256 "$E_IPA" | awk '{print $1}')"
+
+          {
+            echo "HomeAssistant E - HA Binary Probe"
+            echo "================================="
+            echo
+            echo "Purpose:                  Test real HA executable/nested code with known-good minimal Info.plist"
+            echo "Git commit:               $GITHUB_SHA"
+            echo "Bundle ID:                $MAIN_BUNDLE_ID"
+            echo "Team ID:                  $TEAM_ID"
+            echo "Signing certificate SHA1: $SIGNING_CERT_SHA1"
+            echo "Provisioning profile:     $MAIN_PROFILE_NAME"
+            echo "Info.plist SHA-256:       $E_INFO_SHA"
+            echo "Executable SHA-256:       $E_EXEC_SHA"
+            echo "IPA SHA-256:              $E_IPA_SHA"
+            echo "Frameworks:               REAL HA"
+            echo "PlugIns:                  REAL HA"
+            echo "Verification:             SUCCESS"
+          } | tee "$E_INFO"
+
+      - name: Upload E - HA binary probe IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-E-ha-binary-probe-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
       - name: Upload A - archive-direct IPA
         uses: actions/upload-artifact@v4
         with:
