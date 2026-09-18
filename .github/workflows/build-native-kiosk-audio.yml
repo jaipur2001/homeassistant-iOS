@@ -14,7 +14,7 @@ env:
 
 jobs:
   build:
-    name: Build signed iOS kiosk app
+    name: Build unsigned iOS app
     runs-on: macos-26
     timeout-minutes: 90
 
@@ -351,6 +351,172 @@ jobs:
 
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
 
+
+      # =====================================================================
+      # Unsigned .app verlustfrei fuer den Signing-Job archivieren
+      #
+      # GitHub Artifacts selbst erhalten POSIX-Dateirechte nicht garantiert.
+      # Deshalb wird das komplette .app zuerst mit ditto in ein ZIP gepackt.
+      # =====================================================================
+
+      - name: Package unsigned app artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          ARTIFACT_DIR="$PWD/build/unsigned-app-artifact"
+          ARTIFACT_ZIP="$ARTIFACT_DIR/HomeAssistant-unsigned-app.zip"
+
+          rm -rf "$ARTIFACT_DIR"
+          mkdir -p "$ARTIFACT_DIR"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Unsigned application bundle not found:"
+            echo "$APP_PATH"
+            exit 1
+          fi
+
+          echo "Archiving unsigned application:"
+          echo "  $APP_PATH"
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "$APP_PATH" \
+            "$ARTIFACT_ZIP"
+
+          if [ ! -s "$ARTIFACT_ZIP" ]; then
+            echo "::error::Unsigned app archive was not created"
+            exit 1
+          fi
+
+          echo ""
+          echo "Testing archive integrity..."
+
+          unzip -t "$ARTIFACT_ZIP" >/dev/null
+
+          echo ""
+          echo "Unsigned app artifact:"
+          ls -lh "$ARTIFACT_ZIP"
+
+      - name: Upload unsigned app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NativeKioskAudio-unsigned-app
+          path: build/unsigned-app-artifact/HomeAssistant-unsigned-app.zip
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      # =====================================================================
+      # Xcode-Buildlog immer bereitstellen
+      # =====================================================================
+
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: NativeKioskAudio-xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+  sign:
+    name: Sign and verify kiosk IPA
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 25
+
+    steps:
+      # =====================================================================
+      # Build-Ergebnis aus demselben Workflow-Run wiederherstellen
+      #
+      # Bei "Re-run failed jobs" wird der erfolgreiche Build-Job NICHT
+      # erneut ausgefuehrt. Dieser Job verwendet dann erneut dessen Artifact.
+      # =====================================================================
+
+      - name: Download unsigned app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: NativeKioskAudio-unsigned-app
+          path: build/input
+
+      - name: Extract unsigned app artifact
+        id: unsigned_app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$PWD/build/input/HomeAssistant-unsigned-app.zip"
+          EXTRACT_DIR="$PWD/build/unsigned-app-extracted"
+
+          if [ ! -s "$ARCHIVE" ]; then
+            echo "::error::Unsigned app artifact archive not found:"
+            echo "$ARCHIVE"
+            exit 1
+          fi
+
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+
+          echo "Testing downloaded archive..."
+          unzip -t "$ARCHIVE" >/dev/null
+
+          echo "Extracting unsigned application with ditto..."
+
+          ditto \
+            -x \
+            -k \
+            "$ARCHIVE" \
+            "$EXTRACT_DIR"
+
+          APP_PATH="$(
+            find "$EXTRACT_DIR" \
+              -maxdepth 2 \
+              -type d \
+              -name 'Home Assistant*.app' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "::error::Home Assistant .app not found after artifact extraction"
+            find "$EXTRACT_DIR" -maxdepth 3 -print || true
+            exit 1
+          fi
+
+          INFO_PLIST="$APP_PATH/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Info.plist missing from restored .app"
+            exit 1
+          fi
+
+          EXECUTABLE="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$INFO_PLIST"
+          )"
+
+          if [ -z "$EXECUTABLE" ] || [ ! -x "$APP_PATH/$EXECUTABLE" ]; then
+            echo "::error::Restored executable is missing or lost executable permissions"
+            echo "Executable: $EXECUTABLE"
+            ls -la "$APP_PATH" || true
+            exit 1
+          fi
+
+          echo "Restored unsigned application:"
+          echo "  $APP_PATH"
+          echo ""
+          echo "Executable:"
+          ls -lh "$APP_PATH/$EXECUTABLE"
+
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
       # =====================================================================
       # Signierte Kiosk-IPA erstellen
       #
@@ -394,19 +560,11 @@ jobs:
           NOTIFICATION_BUNDLE_ID="de.weber-schubert.homeassistant.kiosk.APNSAttachmentService"
           APP_GROUP_ID="group.de.weber-schubert.homeassistant.kiosk"
 
-          PRODUCT_DIR="$PWD/build/DerivedData/Build/Products/Debug-iphoneos"
-
-          APP_PATH="$(
-            find "$PRODUCT_DIR" \
-              -maxdepth 1 \
-              -type d \
-              -name 'Home Assistant*.app' \
-              -print \
-              -quit
-          )"
+          APP_PATH="${{ steps.unsigned_app.outputs.app_path }}"
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::Home Assistant application bundle not found in $PRODUCT_DIR"
+            echo "::error::Restored unsigned Home Assistant application bundle not found:"
+            echo "$APP_PATH"
             exit 1
           fi
 
@@ -626,7 +784,8 @@ jobs:
               if expiry is None:
                   raise SystemExit(f"ERROR: Provisioning profile {name!r} has no ExpirationDate")
 
-              if expiry <= datetime.datetime.utcnow():
+              now_utc = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+              if expiry <= now_utc:
                   raise SystemExit(
                       f"ERROR: Provisioning profile {name!r} expired at {expiry.isoformat()} UTC"
                   )
@@ -665,9 +824,11 @@ jobs:
               }
 
               if signing_identity.upper() not in cert_fingerprints:
+                  available = ", ".join(sorted(cert_fingerprints)) or "<none>"
                   raise SystemExit(
                       f"ERROR: Imported Apple Development certificate {signing_identity} "
-                      f"is not included in provisioning profile {name!r}"
+                      f"is not included in provisioning profile {name!r}. "
+                      f"Profile certificate SHA-1 values: {available}"
                   )
 
               print(f"Profile OK: {name}")
@@ -1385,14 +1546,3 @@ jobs:
 
           echo "Temporary signing material removed."
 
-      # =====================================================================
-      # Xcode-Buildlog immer bereitstellen
-      # =====================================================================
-
-      - name: Upload Xcode build log
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: NativeKioskAudio-xcodebuild-log
-          path: build/xcodebuild.log
-          if-no-files-found: ignore
