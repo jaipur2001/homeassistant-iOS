@@ -712,6 +712,8 @@ jobs:
           echo "Selected signing identity SHA-1:"
           echo "$SIGNING_IDENTITY"
 
+          echo "SIGNING_CERT_SHA1=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
           echo ""
           echo "Decoding provisioning profiles..."
 
@@ -1515,6 +1517,230 @@ jobs:
           echo "included in the Development provisioning profiles."
 
       # =====================================================================
+      # Produktions-Manifest + GitHub Job Summary
+      #
+      # Keine Secrets werden ausgegeben. Dokumentiert werden nur die
+      # tatsaechlich in der fertigen IPA enthaltenen IDs, Profile,
+      # Entitlements und der Fingerprint des verwendeten Zertifikats.
+      # =====================================================================
+
+      - name: Write signed IPA build summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERIFY_DIR="$PWD/build/ipa-verify"
+          APP_PATH="$VERIFY_DIR/Payload/HomeAssistant.app"
+          INFO_PLIST="$APP_PATH/Info.plist"
+          FIREBASE_PLIST="$APP_PATH/GoogleService-Info-Debug.plist"
+
+          NOTIFICATION_APPEX="$(
+            find "$APP_PATH" \
+              -type d \
+              -name '*.appex' \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$NOTIFICATION_APPEX" ] || [ ! -d "$NOTIFICATION_APPEX" ]; then
+            echo "::error::Notification Service Extension missing while creating build summary"
+            exit 1
+          fi
+
+          NOTIFICATION_INFO="$NOTIFICATION_APPEX/Info.plist"
+
+          MAIN_PROFILE_PLIST="$VERIFY_DIR/main-profile-summary.plist"
+          NOTIFICATION_PROFILE_PLIST="$VERIFY_DIR/notification-profile-summary.plist"
+          MAIN_ENTITLEMENTS="$VERIFY_DIR/main-entitlements-summary.plist"
+          NOTIFICATION_ENTITLEMENTS="$VERIFY_DIR/notification-entitlements-summary.plist"
+
+          security cms \
+            -D \
+            -i "$APP_PATH/embedded.mobileprovision" \
+            > "$MAIN_PROFILE_PLIST"
+
+          security cms \
+            -D \
+            -i "$NOTIFICATION_APPEX/embedded.mobileprovision" \
+            > "$NOTIFICATION_PROFILE_PLIST"
+
+          codesign \
+            -d \
+            --entitlements :- \
+            "$APP_PATH" \
+            > "$MAIN_ENTITLEMENTS" 2>/dev/null
+
+          codesign \
+            -d \
+            --entitlements :- \
+            "$NOTIFICATION_APPEX" \
+            > "$NOTIFICATION_ENTITLEMENTS" 2>/dev/null
+
+          MANIFEST="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt"
+
+          python3 - \
+            "$INFO_PLIST" \
+            "$FIREBASE_PLIST" \
+            "$NOTIFICATION_INFO" \
+            "$MAIN_PROFILE_PLIST" \
+            "$NOTIFICATION_PROFILE_PLIST" \
+            "$MAIN_ENTITLEMENTS" \
+            "$NOTIFICATION_ENTITLEMENTS" \
+            "$MANIFEST" \
+            "$GITHUB_STEP_SUMMARY" \
+            "$SIGNING_CERT_SHA1" \
+            "$GITHUB_SHA" \
+            "$GITHUB_REF_NAME" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import datetime
+          import plistlib
+          import sys
+
+          (
+              info_path,
+              firebase_path,
+              notification_info_path,
+              main_profile_path,
+              notification_profile_path,
+              main_entitlements_path,
+              notification_entitlements_path,
+              manifest_path,
+              summary_path,
+              cert_sha1,
+              git_sha,
+              git_branch,
+              run_id,
+              run_attempt,
+          ) = sys.argv[1:]
+
+          def load_plist(path):
+              with open(path, "rb") as handle:
+                  return plistlib.load(handle)
+
+          info = load_plist(info_path)
+          firebase = load_plist(firebase_path)
+          notification_info = load_plist(notification_info_path)
+          main_profile = load_plist(main_profile_path)
+          notification_profile = load_plist(notification_profile_path)
+          main_entitlements = load_plist(main_entitlements_path)
+          notification_entitlements = load_plist(notification_entitlements_path)
+
+          def iso_utc(value):
+              if value is None:
+                  return "<missing>"
+              if value.tzinfo is None:
+                  value = value.replace(tzinfo=datetime.UTC)
+              return value.astimezone(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+          main_bundle_id = info.get("CFBundleIdentifier", "<missing>")
+          notification_bundle_id = notification_info.get("CFBundleIdentifier", "<missing>")
+          app_version = info.get("CFBundleShortVersionString", "<missing>")
+          app_build = info.get("CFBundleVersion", "<missing>")
+
+          firebase_project = firebase.get("PROJECT_ID", "<missing>")
+          firebase_app_id = firebase.get("GOOGLE_APP_ID", "<missing>")
+          firebase_sender_id = firebase.get("GCM_SENDER_ID", "<missing>")
+
+          apns_environment = main_entitlements.get("aps-environment", "<missing>")
+          app_groups = main_entitlements.get("com.apple.security.application-groups", [])
+          keychain_groups = main_entitlements.get("keychain-access-groups", [])
+          team_id = main_entitlements.get("com.apple.developer.team-identifier", "<missing>")
+
+          main_profile_name = main_profile.get("Name", "<missing>")
+          main_profile_uuid = main_profile.get("UUID", "<missing>")
+          main_profile_expiry = iso_utc(main_profile.get("ExpirationDate"))
+
+          notification_profile_name = notification_profile.get("Name", "<missing>")
+          notification_profile_uuid = notification_profile.get("UUID", "<missing>")
+          notification_profile_expiry = iso_utc(notification_profile.get("ExpirationDate"))
+
+          # Final consistency checks for the report itself.
+          if notification_entitlements.get("com.apple.security.application-groups", []) != app_groups:
+              raise SystemExit(
+                  "ERROR: App Group entitlements differ between app and Notification Service"
+              )
+
+          if notification_entitlements.get("keychain-access-groups", []) != keychain_groups:
+              raise SystemExit(
+                  "ERROR: Keychain entitlements differ between app and Notification Service"
+              )
+
+          lines = [
+              "HomeAssistant Native Kiosk Audio - Build Information",
+              "===================================================",
+              "",
+              f"Git branch:                    {git_branch}",
+              f"Git commit:                    {git_sha}",
+              f"GitHub run ID:                 {run_id}",
+              f"GitHub run attempt:            {run_attempt}",
+              "",
+              f"App version:                   {app_version}",
+              f"App build:                     {app_build}",
+              f"Main bundle ID:                {main_bundle_id}",
+              f"Notification extension ID:     {notification_bundle_id}",
+              "",
+              f"Firebase project ID:           {firebase_project}",
+              f"Firebase Google App ID:        {firebase_app_id}",
+              f"Firebase GCM sender ID:        {firebase_sender_id}",
+              "",
+              f"Apple Team ID:                 {team_id}",
+              f"Signing certificate SHA-1:     {cert_sha1}",
+              f"APNs environment:              {apns_environment}",
+              f"App Group:                     {', '.join(app_groups) if app_groups else '<missing>'}",
+              f"Keychain Group:                {', '.join(keychain_groups) if keychain_groups else '<missing>'}",
+              "",
+              f"Main profile:                  {main_profile_name}",
+              f"Main profile UUID:             {main_profile_uuid}",
+              f"Main profile expires:          {main_profile_expiry}",
+              "",
+              f"Notification profile:          {notification_profile_name}",
+              f"Notification profile UUID:     {notification_profile_uuid}",
+              f"Notification profile expires:  {notification_profile_expiry}",
+              "",
+              "Verification:                   SUCCESS",
+              "",
+          ]
+
+          with open(manifest_path, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(lines))
+
+          summary = f"""## ✅ Signed Native Kiosk Audio IPA
+
+          | Check | Value |
+          |---|---|
+          | **App version** | `{app_version} ({app_build})` |
+          | **Main Bundle ID** | `{main_bundle_id}` |
+          | **Notification Extension** | `{notification_bundle_id}` |
+          | **Firebase Project** | `{firebase_project}` |
+          | **Firebase App ID** | `{firebase_app_id}` |
+          | **Apple Team ID** | `{team_id}` |
+          | **Certificate SHA-1** | `{cert_sha1}` |
+          | **APNs Environment** | `{apns_environment}` |
+          | **App Group** | `{', '.join(app_groups) if app_groups else '<missing>'}` |
+          | **Keychain Group** | `{', '.join(keychain_groups) if keychain_groups else '<missing>'}` |
+          | **Main Provisioning Profile** | `{main_profile_name}` |
+          | **Main Profile Expiry** | `{main_profile_expiry}` |
+          | **Notification Profile** | `{notification_profile_name}` |
+          | **Notification Profile Expiry** | `{notification_profile_expiry}` |
+          | **Git Commit** | `{git_sha}` |
+          | **Run** | `{run_id}`, attempt `{run_attempt}` |
+          | **Verification** | **SUCCESS** |
+
+          The artifact also contains `HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt`.
+          """
+
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write(summary)
+
+          print("\n".join(lines))
+          PY
+
+          echo ""
+          echo "Build manifest:"
+          cat "$MANIFEST"
+
+      # =====================================================================
       # Signierte IPA als GitHub Artifact bereitstellen
       # =====================================================================
 
@@ -1522,7 +1748,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: HomeAssistant-Native-Kiosk-Audio-signed
-          path: build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt
           if-no-files-found: error
           retention-days: 7
 
