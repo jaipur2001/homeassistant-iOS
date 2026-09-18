@@ -4,6 +4,7 @@ import FirebaseMessaging
 import Foundation
 import MediaPlayer
 import PromiseKit
+import SFSafeSymbols
 import Shared
 import SwiftUI
 import UserNotifications
@@ -713,6 +714,15 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             return
         }
 
+        // Guided Access intentionally suppresses the system notification UI on iPadOS.
+        // The push still reaches this foreground delegate, so show an in-app toast instead.
+        // Keep the non-banner presentation options (sound, badge, list) so iOS can still
+        // perform whichever of those Guided Access permits.
+        if let options = guidedAccessPushPresentationOptions(for: notification.request) {
+            completionHandler(options)
+            return
+        }
+
         var methods: UNNotificationPresentationOptions = [.badge, .sound, .list, .banner]
         if let presentationOptions = notification.request.content.userInfo["presentation_options"] as? [String] {
             methods = []
@@ -730,6 +740,74 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             }
         }
         return completionHandler(methods)
+    }
+
+    /// Guided Access on iPadOS suppresses the normal system notification banner while the app is
+    /// pinned in the foreground. The push is still delivered to `willPresent`, so mirror its visible
+    /// content into the app's own toast window. The toast is app-owned and therefore remains visible
+    /// while Guided Access is active.
+    ///
+    /// `isGuidedAccessEnabled` is injectable so this behavior can be tested without changing the
+    /// device's actual Guided Access state.
+    func guidedAccessPushPresentationOptions(
+        for request: UNNotificationRequest,
+        isGuidedAccessEnabled: Bool = UIAccessibility.isGuidedAccessEnabled
+    ) -> UNNotificationPresentationOptions? {
+        guard isGuidedAccessEnabled else {
+            return nil
+        }
+
+        let content = request.content
+        let trimmedTitle = content.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSubtitle = content.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = content.body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Silent/background-only pushes have nothing meaningful to present.
+        guard !trimmedTitle.isEmpty || !trimmedSubtitle.isEmpty || !trimmedBody.isEmpty else {
+            return nil
+        }
+
+        let title = trimmedTitle.isEmpty ? "Home Assistant" : trimmedTitle
+        let messageParts = [trimmedSubtitle, trimmedBody].filter { !$0.isEmpty }
+        let message = messageParts.joined(separator: " — ")
+
+        if #available(iOS 18, *) {
+            Task { @MainActor in
+                ToastPresenter.shared.show(
+                    id: "guided-access-push-\(request.identifier)",
+                    symbol: .bellFill,
+                    symbolForegroundStyle: (.white, .blue),
+                    title: title,
+                    message: message,
+                    duration: 8
+                )
+            }
+        }
+
+        Current.Log.info(
+            "Presenting remote notification as in-app toast because Guided Access is enabled: " +
+                "\(request.identifier)"
+        )
+
+        // Preserve the original non-banner foreground presentation semantics. The custom toast
+        // replaces .banner; .list keeps the notification in Notification Center where iPadOS permits it.
+        var methods: UNNotificationPresentationOptions = [.badge, .sound, .list]
+
+        if let presentationOptions = content.userInfo["presentation_options"] as? [String] {
+            methods = []
+
+            if presentationOptions.contains("sound") || content.sound != nil {
+                methods.insert(.sound)
+            }
+            if presentationOptions.contains("badge") {
+                methods.insert(.badge)
+            }
+            if presentationOptions.contains("list") {
+                methods.insert(.list)
+            }
+        }
+
+        return methods
     }
 
     /// Takes the request rather than the `UNNotification` wrapping it: everything here needs only the
