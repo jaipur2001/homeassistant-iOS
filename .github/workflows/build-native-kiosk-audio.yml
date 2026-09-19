@@ -84,8 +84,9 @@ jobs:
       #   App  -> de.weber-schubert.homeassistant.kiosk
       #   NSE  -> de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
       #
-      # Important: unlike the previous workflow, NOTHING is re-signed by a
-      # hand-written codesign pass after compilation. Xcode owns signing.
+      # Xcode signs the complete Release archive first. The downstream
+      # packaging job then re-signs only the outer HomeAssistant.app bundle
+      # using the proven F-method; all nested code keeps the Xcode signatures.
       # -------------------------------------------------------------------
       - name: Prepare kiosk Xcode configuration
         shell: bash
@@ -185,7 +186,7 @@ jobs:
           path = Path("HomeAssistant.xcodeproj/project.pbxproj")
           source = path.read_text(encoding="utf-8")
 
-          # AppIcon.dev must be applied only to the App target.
+          # The production AppIcon override must be applied only to the App target.
           # A command-line/global ASSETCATALOG_COMPILER_APPICON_NAME would also
           # affect Shared-iOS and make actool look for an app icon in a framework.
           app_release_start_token = 'B657A9121CA646EB00121384 /* Release */ = {'
