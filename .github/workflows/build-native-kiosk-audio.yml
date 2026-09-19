@@ -1,4 +1,4 @@
-name: Build Xcode-Signed Native Kiosk Audio IPA
+name: Build Production Native Kiosk Audio IPA
 
 on:
   workflow_dispatch:
@@ -137,6 +137,31 @@ jobs:
           </plist>
           EOF
 
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Configuration/HomeAssistant.release.xcconfig")
+          source = path.read_text(encoding="utf-8")
+
+          replacements = {
+              "CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution":
+                  "CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Development",
+              "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*] = iOS App Store - $(TARGET_NAME)":
+                  "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*] = $(PROVISIONING_PROFILE_SPECIFIER_$(DEVELOPMENT_TEAM)_$(TARGET_NAME:c99extidentifier))",
+          }
+
+          for old, new in replacements.items():
+              if source.count(old) != 1:
+                  raise SystemExit(
+                      f"ERROR: Expected exactly one Release signing setting {old!r}, "
+                      f"found {source.count(old)}"
+                  )
+              source = source.replace(old, new, 1)
+
+          path.write_text(source, encoding="utf-8")
+          print("Release xcconfig adapted for direct-device Development signing.")
+          PY
+
           cat > Configuration/Entitlements/Extension-ios.entitlements <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -163,63 +188,54 @@ jobs:
           # AppIcon.dev must be applied only to the App target.
           # A command-line/global ASSETCATALOG_COMPILER_APPICON_NAME would also
           # affect Shared-iOS and make actool look for an app icon in a framework.
-          app_debug_start_token = 'B657A9111CA646EB00121384 /* Debug */ = {'
           app_release_start_token = 'B657A9121CA646EB00121384 /* Release */ = {'
+          app_next_start_token = 'B657A9141CA646EB00121384 /* Debug */ = {'
 
-          app_debug_start = source.find(app_debug_start_token)
-          app_release_start = source.find(app_release_start_token, app_debug_start)
+          app_release_start = source.find(app_release_start_token)
+          app_next_start = source.find(app_next_start_token, app_release_start)
 
-          if app_debug_start < 0 or app_release_start < 0:
-              raise SystemExit("ERROR: Could not locate App Debug build configuration")
+          if app_release_start < 0 or app_next_start < 0:
+              raise SystemExit("ERROR: Could not locate App Release build configuration")
 
-          app_debug_block = source[app_debug_start:app_release_start]
+          app_release_block = source[app_release_start:app_next_start]
           original_icon_setting = (
               'ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon${BUNDLE_ID_SUFFIX}";'
           )
-          kiosk_icon_setting = 'ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon.dev";'
+          kiosk_icon_setting = 'ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;'
 
-          if app_debug_block.count(original_icon_setting) != 1:
+          if app_release_block.count(original_icon_setting) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one App Debug icon setting, found "
-                  f"{app_debug_block.count(original_icon_setting)}"
+                  "ERROR: Expected exactly one App Release icon setting, found "
+                  f"{app_release_block.count(original_icon_setting)}"
               )
 
-          app_debug_block = app_debug_block.replace(
+          app_release_block = app_release_block.replace(
               original_icon_setting,
               kiosk_icon_setting,
               1,
           )
 
-          # IMPORTANT:
-          # The upstream Debug product name contains the Greek Delta character:
-          #     Home Assistant Δ
-          #
-          # Xcode's exported IPA stores that path without the ZIP UTF-8 flag.
-          # Some Windows/Python ZIP readers therefore decode the UTF-8 bytes as
-          # CP437 ("╬ö"), so Sideloadly cannot match CFBundleExecutable and
-          # reports that the bundle executable is missing.
-          #
-          # Keep the on-device display name friendly, but make the actual app
-          # directory and Mach-O executable strictly ASCII.
-          original_product_name = 'PRODUCT_NAME = "Home Assistant Δ";'
+          # Keep the app bundle directory and Mach-O executable strictly ASCII
+          # and stable across Debug/Release packaging.
+          original_product_name = 'PRODUCT_NAME = "Home Assistant";'
           kiosk_product_name = 'PRODUCT_NAME = HomeAssistant;'
 
-          if app_debug_block.count(original_product_name) != 1:
+          if app_release_block.count(original_product_name) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one App Debug PRODUCT_NAME setting, found "
-                  f"{app_debug_block.count(original_product_name)}"
+                  "ERROR: Expected exactly one App Release PRODUCT_NAME setting, found "
+                  f"{app_release_block.count(original_product_name)}"
               )
 
-          app_debug_block = app_debug_block.replace(
+          app_release_block = app_release_block.replace(
               original_product_name,
               kiosk_product_name,
               1,
           )
 
           source = (
-              source[:app_debug_start]
-              + app_debug_block
-              + source[app_release_start:]
+              source[:app_release_start]
+              + app_release_block
+              + source[app_next_start:]
           )
 
           # Preserve a readable SpringBoard name independently of PRODUCT_NAME.
@@ -536,7 +552,7 @@ jobs:
 
             if xcodebuild \
               -project HomeAssistant.xcodeproj \
-              -scheme App-Debug \
+              -scheme App-Release \
               -clonedSourcePackagesDirPath "$PACKAGE_DIR" \
               -resolvePackageDependencies
             then
@@ -561,7 +577,7 @@ jobs:
 
           COMMON_ARGS=(
             -project HomeAssistant.xcodeproj
-            -configuration Debug
+            -configuration Release
             -sdk iphoneos
             -clonedSourcePackagesDirPath "$PWD/build/SourcePackages"
             -disableAutomaticPackageResolution
@@ -612,7 +628,7 @@ jobs:
               ),
               "app icon": (
                   app.get("ASSETCATALOG_COMPILER_APPICON_NAME"),
-                  "AppIcon.dev",
+                  "AppIcon",
               ),
               "app profile": (
                   app.get("PROVISIONING_PROFILE_SPECIFIER"),
@@ -645,7 +661,7 @@ jobs:
           PY
 
           echo ""
-          echo "Effective kiosk signing settings verified."
+          echo "Effective Release kiosk signing settings verified."
 
       # -------------------------------------------------------------------
       # Xcode performs the actual signing while archiving. This avoids the
@@ -660,8 +676,8 @@ jobs:
 
           xcodebuild \
             -project HomeAssistant.xcodeproj \
-            -scheme App-Debug \
-            -configuration Debug \
+            -scheme App-Release \
+            -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive" \
             -derivedDataPath "$PWD/build/DerivedData" \
@@ -782,13 +798,13 @@ jobs:
             exit 1
           }
 
-          [ -f "$APP/GoogleService-Info-Debug.plist" ] || {
+          [ -f "$APP/GoogleService-Info-Release.plist" ] || {
             echo "::error::Custom Firebase plist missing"
             exit 1
           }
 
-          FIREBASE_PROJECT="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$APP/GoogleService-Info-Debug.plist")"
-          FIREBASE_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' "$APP/GoogleService-Info-Debug.plist")"
+          FIREBASE_PROJECT="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$APP/GoogleService-Info-Release.plist")"
+          FIREBASE_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' "$APP/GoogleService-Info-Release.plist")"
 
           [ "$FIREBASE_PROJECT" = "homeassistant-kiosk" ] || {
             echo "::error::Unexpected Firebase project: $FIREBASE_PROJECT"
@@ -1148,7 +1164,7 @@ jobs:
             exit 1
           }
 
-          [ -f "$APP_PATH/GoogleService-Info-Debug.plist" ] || {
+          [ -f "$APP_PATH/GoogleService-Info-Release.plist" ] || {
             echo "::error::Firebase configuration is missing"
             exit 1
           }
@@ -1284,9 +1300,10 @@ jobs:
           BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$FINAL_APP/Info.plist")"
 
           {
-            echo "HomeAssistant Native Kiosk Audio - Final Build"
-            echo "=============================================="
+            echo "HomeAssistant Native Kiosk Audio - Production Release Build"
+            echo "============================================================="
             echo
+            echo "Build configuration:       Release"
             echo "Packaging run:             $GITHUB_RUN_ID"
             echo "Source archive run:        ${{ steps.archive_source.outputs.run_id }}"
             echo "Archive source mode:       ${{ steps.archive_source.outputs.mode }}"
@@ -1307,7 +1324,7 @@ jobs:
           } | tee "$BUILD_INFO"
 
           {
-            echo "## Final Native Kiosk Audio IPA"
+            echo "## Production Native Kiosk Audio IPA"
             echo
             echo "| Check | Value |"
             echo "|---|---|"
