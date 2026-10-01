@@ -159,6 +159,9 @@ final class KioskScreensaverController: ObservableObject {
     private let kiosk: KioskModeManager
     private var isEnabled = false
     private var isCameraOverlayVisible = false
+    private var isAlarmOverlayVisible = false
+    private var screensaverWasActiveBeforeAlarm = false
+    private var brightnessBeforeAlarm: CGFloat?
     private var brightnessBeforeDimming: CGFloat?
     private var idleTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
@@ -181,8 +184,11 @@ final class KioskScreensaverController: ObservableObject {
             .store(in: &cancellables)
         NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
             .sink { [weak self] _ in
-                self?.idleTimer?.invalidate()
-                self?.restoreBrightness()
+                guard let self else { return }
+                idleTimer?.invalidate()
+                if !isAlarmOverlayVisible {
+                    restoreBrightness()
+                }
             }
             .store(in: &cancellables)
 
@@ -191,6 +197,14 @@ final class KioskScreensaverController: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] visible in
                 self?.cameraOverlayVisibilityChanged(visible)
+            }
+            .store(in: &cancellables)
+
+        kiosk.alarmOverlayVisiblePublisher
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] visible in
+                self?.alarmOverlayVisibilityChanged(visible)
             }
             .store(in: &cancellables)
 
@@ -207,7 +221,15 @@ final class KioskScreensaverController: ObservableObject {
 
     deinit {
         idleTimer?.invalidate()
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        if let brightnessBeforeAlarm {
+            UIScreen.main.brightness = brightnessBeforeAlarm
+        } else {
+            restoreBrightness()
+        }
+        #else
         restoreBrightness()
+        #endif
         Current.motionDetection.unregister(observer: self)
         // The screensaver is no longer on screen once this controller goes away (e.g. kiosk mode disabled).
         kiosk.setScreensaverVisible(false)
@@ -220,6 +242,10 @@ final class KioskScreensaverController: ObservableObject {
 
     func show() {
         guard isEnabled else { return }
+        guard !isAlarmOverlayVisible else {
+            Current.Log.info("Kiosk: ignoring screensaver show request while an alarm is on display")
+            return
+        }
         guard !isCameraOverlayVisible else {
             Current.Log.info("Kiosk: ignoring screensaver show request while a camera is on display")
             return
@@ -249,6 +275,57 @@ final class KioskScreensaverController: ObservableObject {
             restartIdleTimer()
         }
         updateBrightness()
+    }
+
+    private func alarmOverlayVisibilityChanged(_ visible: Bool) {
+        guard visible != isAlarmOverlayVisible else { return }
+        isAlarmOverlayVisible = visible
+
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        if visible {
+            idleTimer?.invalidate()
+            idleTimer = nil
+
+            screensaverWasActiveBeforeAlarm = isActive
+            brightnessBeforeAlarm = UIScreen.main.brightness
+
+            if isActive {
+                Current.Log.info("Kiosk: alarm on display, temporarily hiding screensaver")
+                isActive = false
+            }
+
+            // Alarm visibility always wins over kiosk dimming.
+            UIScreen.main.brightness = 1.0
+        } else {
+            if let brightnessBeforeAlarm {
+                UIScreen.main.brightness = brightnessBeforeAlarm
+                self.brightnessBeforeAlarm = nil
+            }
+
+            if screensaverWasActiveBeforeAlarm && isEnabled {
+                isActive = true
+            }
+            screensaverWasActiveBeforeAlarm = false
+
+            updateBrightness()
+            if !isActive {
+                restartIdleTimer()
+            }
+        }
+        #else
+        if visible {
+            idleTimer?.invalidate()
+            idleTimer = nil
+            screensaverWasActiveBeforeAlarm = isActive
+            isActive = false
+        } else {
+            if screensaverWasActiveBeforeAlarm && isEnabled {
+                isActive = true
+            }
+            screensaverWasActiveBeforeAlarm = false
+            restartIdleTimer()
+        }
+        #endif
     }
 
     private func apply(_ settings: KioskSettings) {
@@ -286,7 +363,7 @@ final class KioskScreensaverController: ObservableObject {
         idleTimer = nil
         // Never arm the idle timer while motion is ongoing: it restarts (with the full
         // interval) once the motion detector reports clear.
-        guard isEnabled, !isActive, !isMotionDetected, !isCameraOverlayVisible,
+        guard isEnabled, !isActive, !isMotionDetected, !isCameraOverlayVisible, !isAlarmOverlayVisible,
               let interval = screensaver.timeToStart.timeInterval else { return }
         idleTimer = Timer.scheduledTimer(
             withTimeInterval: interval,
@@ -300,6 +377,11 @@ final class KioskScreensaverController: ObservableObject {
 
     private func updateBrightness() {
         #if os(iOS) && !targetEnvironment(macCatalyst)
+        if isAlarmOverlayVisible {
+            UIScreen.main.brightness = 1.0
+            return
+        }
+
         guard shouldDimBrightness else {
             restoreBrightness()
             return
@@ -319,7 +401,8 @@ final class KioskScreensaverController: ObservableObject {
             isEnabled &&
             isActive &&
             screensaver.dimEnabled &&
-            !isCameraOverlayVisible
+            !isCameraOverlayVisible &&
+            !isAlarmOverlayVisible
         #else
         false
         #endif
