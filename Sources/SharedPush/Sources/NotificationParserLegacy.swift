@@ -156,6 +156,8 @@ public struct LegacyNotificationParserImpl: LegacyNotificationParser {
             "alarm_area",
             "alarm_source",
             "alarm_priority",
+            "alarm_message",
+            "alarm_button_text",
             "ack_entity_id",
         ] {
             if let value = data[key] {
