@@ -66,6 +66,10 @@ final class CameraStreamSensor: SensorProvider {
             "Port": server.port,
             "Clients": server.clientCount,
             "Stream URL": server.streamURL ?? "unavailable (no Wi-Fi address)",
+            "Capture Running": Current.motionDetection.captureIsRunning,
+            "Last Frame Age": Current.motionDetection.secondsSinceLastFrame,
+            "Restart Count": Current.motionDetection.captureRestartCount,
+            "Last Restart Reason": Current.motionDetection.captureLastRestartReason,
         ]
         sensor.detailFooter = L10n.Sensors.CameraStream.detailFooter
 
