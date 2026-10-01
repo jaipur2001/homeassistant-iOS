@@ -45,7 +45,7 @@ jobs:
         run: >-
           xcodebuild -resolvePackageDependencies
           -project HomeAssistant.xcodeproj
-          -scheme HomeAssistant
+          -scheme App-Release
 
       - name: Build unsigned iOS app for Sideloadly
         run: |
@@ -55,7 +55,7 @@ jobs:
 
           xcodebuild \
             -project HomeAssistant.xcodeproj \
-            -scheme HomeAssistant \
+            -scheme App-Release \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
