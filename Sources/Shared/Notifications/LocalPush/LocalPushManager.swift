@@ -98,6 +98,13 @@ public class LocalPushManager {
         })
     }
 
+    /// Retries the Home Assistant local-push WebSocket subscription even when
+    /// the webhook ID itself has not changed. This covers kiosk startup/reconnect
+    /// where the manager may be created before the API connection is ready.
+    public func retrySubscription() {
+        updateSubscription(force: true)
+    }
+
     deinit {
         invalidate()
         tokens.forEach { $0.cancel() }
@@ -131,10 +138,10 @@ public class LocalPushManager {
 
     private var subscription: SubscriptionInstance?
 
-    private func updateSubscription() {
+    private func updateSubscription(force: Bool = false) {
         let webhookID = server.info.connection.webhookID
 
-        guard webhookID != subscription?.webhookID else {
+        guard force || webhookID != subscription?.webhookID else {
             // webhookID hasn't changed, so we don't need to reset
             return
         }
@@ -142,9 +149,11 @@ public class LocalPushManager {
 
         guard let connection = Current.api(for: server)?.connection else {
             Current.Log.error("No API available to update subscription")
+            state = .unavailable
             return
         }
 
+        state = .establishing
         subscription = .init(
             token: connection.subscribe(
                 to: .localPush(webhookID: webhookID, serverVersion: server.info.version),
