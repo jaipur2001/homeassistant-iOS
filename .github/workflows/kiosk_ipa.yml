@@ -9,7 +9,7 @@ on:
         type: string
   push:
     branches:
-      - kiosk-recovery-signals
+      - kiosk-main
     paths:
       - ".github/kiosk-build-trigger"
 
