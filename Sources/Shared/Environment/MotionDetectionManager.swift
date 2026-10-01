@@ -140,11 +140,16 @@ public class MotionDetectionManager: NSObject {
     private var observers = NSHashTable<AnyObject>(options: .weakMemory)
     private var wantsRunning = false
 
+    private struct CaptureHealth {
+        var lastFrameDate = Date.distantPast
+        var restartCount = 0
+        var lastRestartReason = "never"
+        var applicationIsActive = true
+    }
+
+    private let captureHealth = HAProtected<CaptureHealth>(value: .init())
     private let captureWatchdogQueue = DispatchQueue(label: "motion-detection-watchdog")
     private var captureWatchdogTimer: DispatchSourceTimer?
-    private var lastFrameDate = Date.distantPast
-    private var restartCount = 0
-    private var lastRestartReason = "never"
     private let captureFrameTimeout: TimeInterval = 4
 
     override public init() {
@@ -239,7 +244,7 @@ public class MotionDetectionManager: NSObject {
                 if self.isCaptureSessionConfigured, !self.captureSession.isRunning {
                     self.previousSamples = nil
                     self.captureSession.startRunning()
-                    self.lastFrameDate = Date()
+                    self.captureHealth.mutate { $0.lastFrameDate = Date() }
                     self.startCaptureWatchdog()
                     Current.Log.info("Motion detection: capture session started")
                 } else if self.isCaptureSessionConfigured {
@@ -266,10 +271,12 @@ public class MotionDetectionManager: NSObject {
 
     @objc private func applicationDidEnterBackground() {
         // iOS forbids camera capture in the background; stop cleanly.
+        captureHealth.mutate { $0.applicationIsActive = false }
         stopSession()
     }
 
     @objc private func applicationDidBecomeActive() {
+        captureHealth.mutate { $0.applicationIsActive = true }
         if wantsRunning {
             forceRestartSession(reason: "app-became-active")
             // Orientation notifications are suspended in the background, so the device
@@ -307,7 +314,10 @@ public class MotionDetectionManager: NSObject {
             timer.setEventHandler { [weak self] in
                 guard let self, wantsRunning else { return }
 
-                let age = Date().timeIntervalSince(lastFrameDate)
+                let health = captureHealth.read { $0 }
+                guard health.applicationIsActive else { return }
+
+                let age = Date().timeIntervalSince(health.lastFrameDate)
                 guard age >= captureFrameTimeout else { return }
 
                 Current.Log.warning(
@@ -330,11 +340,18 @@ public class MotionDetectionManager: NSObject {
     }
 
     private func forceRestartSession(reason: String) {
-        restartCount += 1
-        lastRestartReason = reason
+        let restartCount = captureHealth.mutate { health -> Int in
+            guard health.applicationIsActive else { return health.restartCount }
+            health.restartCount += 1
+            health.lastRestartReason = reason
+            return health.restartCount
+        }
+
+        guard captureHealth.read({ $0.applicationIsActive }) else { return }
 
         sessionQueue.async { [weak self] in
             guard let self, wantsRunning else { return }
+            guard captureHealth.read({ $0.applicationIsActive }) else { return }
 
             Current.Log.warning(
                 "Motion detection: restarting capture session, reason=\(reason), count=\(restartCount)"
@@ -345,7 +362,7 @@ public class MotionDetectionManager: NSObject {
             }
 
             previousSamples = nil
-            lastFrameDate = Date()
+            captureHealth.mutate { $0.lastFrameDate = Date() }
 
             if !isCaptureSessionConfigured {
                 configureCaptureSession()
@@ -364,15 +381,16 @@ public class MotionDetectionManager: NSObject {
     }
 
     public var secondsSinceLastFrame: Double {
-        max(0, Date().timeIntervalSince(lastFrameDate))
+        let date = captureHealth.read { $0.lastFrameDate }
+        return max(0, Date().timeIntervalSince(date))
     }
 
     public var captureRestartCount: Int {
-        restartCount
+        captureHealth.read { $0.restartCount }
     }
 
     public var captureLastRestartReason: String {
-        lastRestartReason
+        captureHealth.read { $0.lastRestartReason }
     }
 
     // MARK: - Orientation
@@ -569,7 +587,7 @@ extension MotionDetectionManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        lastFrameDate = Date()
+        captureHealth.mutate { $0.lastFrameDate = Date() }
 
         // Feed the MJPEG stream server every frame (no-op when no client is connected).
         Current.cameraStreamServer.handle(frame: pixelBuffer)
@@ -622,6 +640,10 @@ public class MotionDetectionManager {
     public private(set) var isMotionDetected = false
     public var canDetectMotion: Bool { false }
     public var attributes: [String: Any] { [:] }
+    public var captureIsRunning: Bool { false }
+    public var secondsSinceLastFrame: Double { 0 }
+    public var captureRestartCount: Int { 0 }
+    public var captureLastRestartReason: String { "unsupported" }
 
     public init() {}
 
