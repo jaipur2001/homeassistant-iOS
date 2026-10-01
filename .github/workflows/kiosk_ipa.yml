@@ -41,19 +41,40 @@ jobs:
           echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           xcodebuild -version
 
-      - name: Build iOS IPA
-        run: bundle exec fastlane ios build
-        env:
-          P12_KEY_DISTRIBUTION: ${{ secrets.P12_KEY_DISTRIBUTION }}
-          P12_VALUE_DISTRIBUTION: ${{ secrets.P12_VALUE_DISTRIBUTION }}
-          HOMEASSISTANT_APPLE_ID: ${{ secrets.HOMEASSISTANT_APPLE_ID }}
-          HOMEASSISTANT_APP_STORE_CONNECT_PASSWORD: ${{ secrets.HOMEASSISTANT_APP_STORE_CONNECT_PASSWORD }}
-          HOMEASSISTANT_APP_STORE_CONNECT_TEAM_ID: ${{ secrets.HOMEASSISTANT_APP_STORE_CONNECT_TEAM_ID }}
-          HOMEASSISTANT_TEAM_ID: ${{ secrets.HOMEASSISTANT_TEAM_ID }}
-          EMERGE_API_TOKEN: ${{ secrets.EMERGE_API_TOKEN }}
-          EMERGE_REPO_NAME: ${{ github.repository }}
-          EMERGE_SHA: ${{ github.sha }}
-          EMERGE_BASE_SHA: ${{ github.event.before }}
+      - name: Resolve Swift packages
+        run: >-
+          xcodebuild -resolvePackageDependencies
+          -project HomeAssistant.xcodeproj
+          -scheme HomeAssistant
+
+      - name: Build unsigned iOS app for Sideloadly
+        run: |
+          set -euo pipefail
+          rm -rf build/kiosk
+          mkdir -p build/kiosk/Payload
+
+          xcodebuild \
+            -project HomeAssistant.xcodeproj \
+            -scheme HomeAssistant \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/kiosk/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          APP_PATH=$(find build/kiosk/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No iOS .app bundle found"
+            exit 1
+          fi
+
+          echo "Packaging $APP_PATH"
+          cp -R "$APP_PATH" build/kiosk/Payload/
+          cd build/kiosk
+          /usr/bin/zip -qry "../HA-Kiosk-unsigned.ipa" Payload
 
       - name: Dump version information
         if: always()
@@ -63,14 +84,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ha-kiosk-ios.ipa
-          path: build/ios/Home Assistant.ipa
+          name: ha-kiosk-unsigned.ipa
+          path: build/HA-Kiosk-unsigned.ipa
           if-no-files-found: error
 
-      - name: Upload iOS dSYMs
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ha-kiosk-ios.dSYM.zip
-          path: build/ios/Home Assistant.app.dSYM.zip
-          if-no-files-found: warn
