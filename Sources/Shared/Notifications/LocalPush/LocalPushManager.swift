@@ -241,6 +241,9 @@ public class LocalPushManager {
                     api: api
                 )
             }
+
+            await Self.registerDynamicNotificationCategoryIfNeeded(for: content)
+
             add(UNNotificationRequest(
                 identifier: event.identifier,
                 content: content,
@@ -256,6 +259,40 @@ public class LocalPushManager {
     }
 
     static let confirmIDUserInfoKey = "hass_confirm_id"
+
+    private static func registerDynamicNotificationCategoryIfNeeded(
+        for content: UNNotificationContent
+    ) async {
+        let actions = content.userInfoActions
+        guard !actions.isEmpty,
+              !content.categoryIdentifier.isEmpty else {
+            return
+        }
+
+        let center = UNUserNotificationCenter.current()
+        let categories = await withCheckedContinuation { continuation in
+            center.getNotificationCategories { categories in
+                continuation.resume(returning: categories)
+            }
+        }
+
+        let category = UNNotificationCategory(
+            identifier: content.categoryIdentifier,
+            actions: actions,
+            intentIdentifiers: [],
+            options: []
+        )
+
+        var updatedCategories = Set(
+            categories.filter { $0.identifier != content.categoryIdentifier }
+        )
+        updatedCategories.insert(category)
+        center.setNotificationCategories(updatedCategories)
+
+        Current.Log.info(
+            "Registered local push notification category \(content.categoryIdentifier) with \(actions.count) action(s)"
+        )
+    }
 
     private static func isLiveActivityCommand(_ userInfo: [AnyHashable: Any]) -> Bool {
         guard let hadict = userInfo["homeassistant"] as? [String: Any] else { return false }
