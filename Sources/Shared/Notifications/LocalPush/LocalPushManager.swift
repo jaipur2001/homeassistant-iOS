@@ -242,6 +242,12 @@ public class LocalPushManager {
                 )
             }
 
+            let diagnosticActions = content.userInfoActions.map(\.identifier)
+            Current.Log.info(
+                "[KIOSK_ACTION_DIAG] before add: category=\(content.categoryIdentifier), " +
+                    "actions=\(diagnosticActions), userInfoActionsPresent=\(content.userInfo["actions"] != nil)"
+            )
+
             await Self.registerDynamicNotificationCategoryIfNeeded(for: content)
 
             add(UNNotificationRequest(
@@ -264,8 +270,19 @@ public class LocalPushManager {
         for content: UNNotificationContent
     ) async {
         let actions = content.userInfoActions
+        let actionIdentifiers = actions.map(\.identifier)
+
+        Current.Log.info(
+            "[KIOSK_ACTION_DIAG] registration request: category=\(content.categoryIdentifier), " +
+                "actions=\(actionIdentifiers), rawActions=\(String(describing: content.userInfo["actions"]))"
+        )
+
         guard !actions.isEmpty,
               !content.categoryIdentifier.isEmpty else {
+            Current.Log.warning(
+                "[KIOSK_ACTION_DIAG] registration skipped: category=\(content.categoryIdentifier), " +
+                    "actions=\(actionIdentifiers)"
+            )
             return
         }
 
@@ -283,14 +300,31 @@ public class LocalPushManager {
             options: []
         )
 
+        let categoriesBefore = categories
+            .map { "\($0.identifier):\($0.actions.map(\.identifier))" }
+            .sorted()
+
+        Current.Log.info(
+            "[KIOSK_ACTION_DIAG] categories before registration: \(categoriesBefore)"
+        )
+
         var updatedCategories = Set(
             categories.filter { $0.identifier != content.categoryIdentifier }
         )
         updatedCategories.insert(category)
         center.setNotificationCategories(updatedCategories)
 
+        let categoriesAfter = await withCheckedContinuation { continuation in
+            center.getNotificationCategories { registeredCategories in
+                continuation.resume(returning: registeredCategories)
+            }
+        }
+        let categoriesAfterSummary = categoriesAfter
+            .map { "\($0.identifier):\($0.actions.map(\.identifier))" }
+            .sorted()
+
         Current.Log.info(
-            "Registered local push notification category \(content.categoryIdentifier) with \(actions.count) action(s)"
+            "[KIOSK_ACTION_DIAG] categories after registration: \(categoriesAfterSummary)"
         )
     }
 
