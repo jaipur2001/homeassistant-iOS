@@ -7,9 +7,6 @@ on:
         description: "Optional: successful workflow run ID whose signed Xcode archive should be reused. Leave empty to run Xcode again."
         required: false
         type: string
-  push:
-    branches:
-      - kiosk-recovery-signals
 
 permissions:
   contents: read
