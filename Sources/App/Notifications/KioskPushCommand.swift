@@ -12,6 +12,8 @@ enum KioskPushCommand: String, CaseIterable {
     case setVolume = "kiosk_set_volume"
     case playMedia = "kiosk_play_media"
     case stopMedia = "kiosk_stop_media"
+    case showAlarm = "kiosk_show_alarm"
+    case hideAlarm = "kiosk_hide_alarm"
     case setScreensaverMode = "kiosk_set_screensaver_mode"
     case setScreensaverBrightness = "kiosk_set_screensaver_brightness"
     case reload = "kiosk_reload"
@@ -38,8 +40,8 @@ enum KioskPushCommand: String, CaseIterable {
             return "level"
         case .setVolume, .playMedia:
             return "volume"
-        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .stopMedia, .setScreensaverMode,
-             .reload, .defaultDashboard:
+        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .stopMedia, .showAlarm, .hideAlarm,
+             .setScreensaverMode, .reload, .defaultDashboard:
             return nil
         }
     }
@@ -49,7 +51,7 @@ enum KioskPushCommand: String, CaseIterable {
         case .setScreensaverMode:
             return "mode"
         case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .setBrightness, .setVolume,
-             .playMedia, .stopMedia, .setScreensaverBrightness, .reload, .defaultDashboard:
+             .playMedia, .stopMedia, .showAlarm, .hideAlarm, .setScreensaverBrightness, .reload, .defaultDashboard:
             return nil
         }
     }
@@ -144,6 +146,10 @@ enum KioskPushCommand: String, CaseIterable {
             return "Play media"
         case .stopMedia:
             return "Stop media"
+        case .showAlarm:
+            return "Show alarm"
+        case .hideAlarm:
+            return "Hide alarm"
         case .setScreensaverMode:
             return L10n.Kiosk.PushCommand.setScreensaverMode
         case .setScreensaverBrightness:
@@ -177,6 +183,10 @@ enum KioskPushCommand: String, CaseIterable {
             return .playCircleFill
         case .stopMedia:
             return .stopCircleFill
+        case .showAlarm:
+            return .exclamationmarkTriangleFill
+        case .hideAlarm:
+            return .checkmarkCircleFill
         case .setScreensaverMode:
             return .moonStars
         case .setScreensaverBrightness:
@@ -220,6 +230,10 @@ enum KioskPushCommand: String, CaseIterable {
             return (.white, .red)
         case .stopMedia:
             return (.white, .gray)
+        case .showAlarm:
+            return (.white, .red)
+        case .hideAlarm:
+            return (.white, .green)
         case .setScreensaverMode:
             return (.white, .purple)
         case .setScreensaverBrightness:
