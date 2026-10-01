@@ -16,7 +16,7 @@ permissions:
   actions: read
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
   MAIN_BUNDLE_ID: de.weber-schubert.homeassistant.kiosk
   NOTIFICATION_BUNDLE_ID: de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
   APP_GROUP_ID: group.de.weber-schubert.homeassistant.kiosk
@@ -26,7 +26,7 @@ jobs:
   archive:
     name: Archive signed kiosk app with Xcode
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.archive_run_id == '' }}
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
 
     steps:
@@ -957,7 +957,7 @@ jobs:
     name: Package final kiosk IPA
     needs: archive
     if: ${{ always() && (needs.archive.result == 'success' || needs.archive.result == 'skipped') }}
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
 
     steps:
