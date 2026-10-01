@@ -378,7 +378,7 @@ public class MotionDetectionManager: NSObject {
             captureSession.startRunning()
             captureHealth.mutate {
                 $0.lastFrameDate = Date()
-                $0.isRunning = captureSession.isRunning
+                $0.isRunning = self.captureSession.isRunning
             }
             startCaptureWatchdog()
             Current.Log.info("Motion detection: capture session restarted")
