@@ -160,7 +160,6 @@ private final class RecordingScheduler {
     }
 }
 
-
 @MainActor
 private final class RecordingRecoverySignalObserver {
     private var action: (@MainActor () -> Void)?
