@@ -1,90 +1,1365 @@
 name: Kiosk IPA Build
 
 on:
+  workflow_dispatch:
+    inputs:
+      archive_run_id:
+        description: "Optional: successful workflow run ID whose signed Xcode archive should be reused. Leave empty to run Xcode again."
+        required: false
+        type: string
   push:
     branches:
       - kiosk-recovery-signals
-  workflow_dispatch:
+    paths-ignore:
+      - ".github/workflows/kiosk_ipa.yml"
+
+permissions:
+  contents: read
+  actions: read
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
-  FASTLANE_SKIP_UPDATE_CHECK: true
-  FASTLANE_XCODE_LIST_TIMEOUT: 60
-  FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 180
-  HOMEBREW_NO_INSTALL_CLEANUP: TRUE
-  BUNDLE_PATH: vendor/bundle
+  DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
+  MAIN_BUNDLE_ID: de.weber-schubert.homeassistant.kiosk
+  NOTIFICATION_BUNDLE_ID: de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
+  APP_GROUP_ID: group.de.weber-schubert.homeassistant.kiosk
+  TEAM_ID: QKSPJURFCD
 
 jobs:
-  build-ios:
-    runs-on: xcode-27
+  archive:
+    name: Archive signed kiosk app with Xcode
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.archive_run_id == '' }}
+    runs-on: macos-26
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
-        with:
-          ruby-version: .ruby-version
-
-      - name: Cache gems
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: vendor/bundle
-          key: ${{ runner.os }}-kiosk-gems-${{ hashFiles('.ruby-version', '**/Gemfile.lock') }}
-
-      - name: Install Gems
-        run: bundle install --jobs 4 --retry 3
-
-      - name: Report selected Xcode
+      - name: Environment
+        shell: bash
         run: |
           set -euo pipefail
-          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           xcodebuild -version
+          swift --version
+          sw_vers
+          echo "Commit: $GITHUB_SHA"
+          echo "Branch: $GITHUB_REF_NAME"
+
+      # -------------------------------------------------------------------
+      # Runtime patch used by the kiosk build.
+      # -------------------------------------------------------------------
+      - name: Apply kiosk runtime patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Sources/Shared/Environment/Environment.swift")
+          source = path.read_text(encoding="utf-8")
+
+          old = "public var Log: XCGLogger = {"
+          new = "public lazy var Log: XCGLogger = {"
+
+          if new in source and old not in source:
+              print("Runtime patch already present.")
+          elif source.count(old) == 1:
+              path.write_text(source.replace(old, new, 1), encoding="utf-8")
+              print("Runtime patch applied.")
+          else:
+              raise SystemExit(
+                  f"ERROR: Expected exactly one unpatched logger declaration, found {source.count(old)}"
+              )
+          PY
+
+          grep -nF 'public lazy var Log: XCGLogger = {'             Sources/Shared/Environment/Environment.swift
+
+      # -------------------------------------------------------------------
+      # Build only the main iPad app and the remote-push Notification
+      # Service Extension. Everything else needs additional App IDs and
+      # provisioning profiles and is not required by the kiosk.
+      #
+      # Bundle IDs are produced by the regular HA build system:
+      #   App  -> de.weber-schubert.homeassistant.kiosk
+      #   NSE  -> de.weber-schubert.homeassistant.kiosk.APNSAttachmentService
+      #
+      # Important: unlike the previous workflow, NOTHING is re-signed by a
+      # hand-written codesign pass after compilation. Xcode owns signing.
+      # -------------------------------------------------------------------
+      - name: Prepare kiosk Xcode configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > Configuration/HomeAssistant.overrides.xcconfig <<'EOF'
+          // CI-only kiosk overrides.
+          DEVELOPMENT_TEAM = QKSPJURFCD
+          BUNDLE_ID_PREFIX = de.weber-schubert
+          BUNDLE_ID_SUFFIX = .kiosk
+
+          // Upstream uses ".HomeAssistant". Our registered App ID is lower-case.
+          PRODUCT_BUNDLE_IDENTIFIER = $(BUNDLE_ID_PREFIX).homeassistant$(BUNDLE_ID_SUFFIX)$(PROVISIONING_SUFFIX)
+          
+          CODE_SIGN_STYLE_DEFAULT = Manual
+          CODE_SIGN_IDENTITY = Apple Development
+          
+          // Profile names are read from the actual .mobileprovision files later
+          // and supplied to xcodebuild as KIOSK_* build settings.
+          PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_App = $(KIOSK_MAIN_PROFILE_NAME)
+          PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_Extensions_NotificationService = $(KIOSK_NSE_PROFILE_NAME)
+          
+          ENABLE_CRITICAL_ALERTS_QKSPJURFCD = 0
+          ENABLE_PUSH_PROVIDER_QKSPJURFCD = 0
+          ENABLE_DEVICE_NAME_QKSPJURFCD = 0
+          ENABLE_THREAD_NETWORK_CREDENTIALS_QKSPJURFCD = 0
+          ENABLE_CARPLAY_QMQYCKL255 = 0
+          ENABLE_CARPLAY_QKSPJURFCD = 0
+          EOF
+
+          # Minimal entitlements that are actually present in our profiles.
+          cat > Configuration/Entitlements/App-ios.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>aps-environment</key>
+              <string>development</string>
+              <key>com.apple.security.application-groups</key>
+              <array>
+                  <string>group.de.weber-schubert.homeassistant.kiosk</string>
+              </array>
+              <key>keychain-access-groups</key>
+              <array>
+                  <string>$(AppIdentifierPrefix)de.weber-schubert.homeassistant.kiosk</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Configuration/HomeAssistant.release.xcconfig")
+          source = path.read_text(encoding="utf-8")
+
+          replacements = {
+              "CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution":
+                  "CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Development",
+              "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*] = iOS App Store - $(TARGET_NAME)":
+                  "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*] = $(PROVISIONING_PROFILE_SPECIFIER_$(DEVELOPMENT_TEAM)_$(TARGET_NAME:c99extidentifier))",
+          }
+
+          for old, new in replacements.items():
+              if source.count(old) != 1:
+                  raise SystemExit(
+                      f"ERROR: Expected exactly one Release signing setting {old!r}, "
+                      f"found {source.count(old)}"
+                  )
+              source = source.replace(old, new, 1)
+
+          path.write_text(source, encoding="utf-8")
+          print("Release xcconfig adapted for direct-device Development signing.")
+          PY
+
+          cat > Configuration/Entitlements/Extension-ios.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.application-groups</key>
+              <array>
+                  <string>group.de.weber-schubert.homeassistant.kiosk</string>
+              </array>
+              <key>keychain-access-groups</key>
+              <array>
+                  <string>$(AppIdentifierPrefix)de.weber-schubert.homeassistant.kiosk</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("HomeAssistant.xcodeproj/project.pbxproj")
+          source = path.read_text(encoding="utf-8")
+
+          # AppIcon.dev must be applied only to the App target.
+          # A command-line/global ASSETCATALOG_COMPILER_APPICON_NAME would also
+          # affect Shared-iOS and make actool look for an app icon in a framework.
+          app_release_start_token = 'B657A9121CA646EB00121384 /* Release */ = {'
+          app_next_start_token = 'B657A9141CA646EB00121384 /* Debug */ = {'
+
+          app_release_start = source.find(app_release_start_token)
+          app_next_start = source.find(app_next_start_token, app_release_start)
+
+          if app_release_start < 0 or app_next_start < 0:
+              raise SystemExit("ERROR: Could not locate App Release build configuration")
+
+          app_release_block = source[app_release_start:app_next_start]
+          original_icon_setting = (
+              'ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon${BUNDLE_ID_SUFFIX}";'
+          )
+          kiosk_icon_setting = 'ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;'
+
+          if app_release_block.count(original_icon_setting) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one App Release icon setting, found "
+                  f"{app_release_block.count(original_icon_setting)}"
+              )
+
+          app_release_block = app_release_block.replace(
+              original_icon_setting,
+              kiosk_icon_setting,
+              1,
+          )
+
+          # Keep the app bundle directory and Mach-O executable strictly ASCII
+          # and stable across Debug/Release packaging.
+          original_product_name = 'PRODUCT_NAME = "Home Assistant";'
+          kiosk_product_name = 'PRODUCT_NAME = HomeAssistant;'
+
+          if app_release_block.count(original_product_name) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one App Release PRODUCT_NAME setting, found "
+                  f"{app_release_block.count(original_product_name)}"
+              )
+
+          app_release_block = app_release_block.replace(
+              original_product_name,
+              kiosk_product_name,
+              1,
+          )
+
+          source = (
+              source[:app_release_start]
+              + app_release_block
+              + source[app_next_start:]
+          )
+
+          # Preserve a readable SpringBoard name independently of PRODUCT_NAME.
+          info_path = Path("Sources/App/Resources/Info.plist")
+          info = info_path.read_text(encoding="utf-8")
+          old_display = (
+              "<key>CFBundleDisplayName</key>\n"
+              "\t<string>$(PRODUCT_NAME)</string>"
+          )
+          new_display = (
+              "<key>CFBundleDisplayName</key>\n"
+              "\t<string>Home Assistant Kiosk</string>"
+          )
+
+          if info.count(old_display) != 1:
+              raise SystemExit(
+                  "ERROR: Could not uniquely patch CFBundleDisplayName in Info.plist"
+              )
+
+          info_path.write_text(
+              info.replace(old_display, new_display, 1),
+              encoding="utf-8",
+          )
+
+          remove_lines = [
+              # Other embedded iOS extensions
+              '1155DD10250F4101003405C0 /* HomeAssistant-Extensions-Share.appex in Embed Foundation Extensions */',
+              '11B92913266F145000786588 /* HomeAssistant-Extensions-PushProvider.appex in Embed Foundation Extensions */',
+              'B627CB151D83C87B0057173E /* HomeAssistant-Extensions-NotificationContent.appex in Embed Foundation Extensions */',
+              '1171507624DFCDEE0065E874 /* HomeAssistant-Extensions-Widgets.appex in Embed Foundation Extensions */',
+              '11B6B5822948F8E100B8B552 /* HomeAssistant-Extensions-Matter.appex in Embed Foundation Extensions */',
+              'B66C58AC215086F0004AB261 /* HomeAssistant-Extensions-Intents.appex in Embed Foundation Extensions */',
+
+              # Watch product
+              'B6CC5D9E2159D10F00833E5D /* HomeAssistant-WatchApp.app in Embed Watch Content */',
+
+              # App target dependencies not used by kiosk
+              'B66C58AB215086F0004AB261 /* PBXTargetDependency */',
+              'B627CB141D83C87B0057173E /* PBXTargetDependency */',
+              '1155DD0F250F4101003405C0 /* PBXTargetDependency */',
+              '1171507524DFCDEE0065E874 /* PBXTargetDependency */',
+              'B6CC5D9D2159D10F00833E5D /* PBXTargetDependency */',
+              '11DE9F9825B6173D0081C0ED /* PBXTargetDependency */',
+              '11B92912266F145000786588 /* PBXTargetDependency */',
+              '11B6B5812948F8E100B8B552 /* PBXTargetDependency */',
+          ]
+
+          for token in remove_lines:
+              lines = source.splitlines()
+
+              # Only remove references from arrays such as buildPhases/dependencies.
+              # Keep the actual PBXBuildFile/PBXTargetDependency object definitions.
+              removable = [
+                  line for line in lines
+                  if token in line and "= {" not in line
+              ]
+
+              if len(removable) != 1:
+                  raise SystemExit(
+                      f"ERROR: Expected exactly one removable project reference for {token!r}, "
+                      f"found {len(removable)}: {removable!r}"
+                  )
+
+              line_to_remove = removable[0]
+              source = "\n".join(
+                  line for line in lines
+                  if line != line_to_remove
+              ) + "\n"
+
+          # The one extension that must remain.
+          required = (
+              'B6AAD7A81D827DD40090B220 '
+              '/* HomeAssistant-Extensions-NotificationService.appex in Embed Foundation Extensions */'
+          )
+          if required not in source:
+              raise SystemExit("ERROR: Notification Service embed entry was removed unexpectedly")
+
+          path.write_text(source, encoding="utf-8")
+          print("Project reduced to App + Notification Service for kiosk archive.")
+          PY
+
+          echo ""
+          echo "Validating edited Xcode project..."
+          /usr/bin/plutil -lint HomeAssistant.xcodeproj/project.pbxproj
+
+          echo ""
+          echo "Xcode project plist syntax check: OK"
+          echo "Skipping xcodebuild -list here because it would trigger SwiftPM network resolution."
+
+          echo ""
+          echo "Kiosk build settings:"
+          cat Configuration/HomeAssistant.overrides.xcconfig
+
+      # -------------------------------------------------------------------
+      # Import certificate and profiles before Xcode builds.
+      # Xcode 16+ uses ~/Library/Developer/Xcode/UserData/Provisioning Profiles.
+      # We also populate the legacy cache path for compatibility.
+      # -------------------------------------------------------------------
+      - name: Install signing material
+        id: signing
+        shell: bash
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MAIN_PROFILE_BASE64: ${{ secrets.IOS_MAIN_PROFILE_BASE64 }}
+          IOS_NOTIFICATION_PROFILE_BASE64: ${{ secrets.IOS_NOTIFICATION_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          for name in             IOS_CERTIFICATE_P12_BASE64             IOS_CERTIFICATE_PASSWORD             IOS_MAIN_PROFILE_BASE64             IOS_NOTIFICATION_PROFILE_BASE64
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub secret $name is missing or empty"
+              exit 1
+            fi
+          done
+
+          SIGN_DIR="$RUNNER_TEMP/kiosk-signing"
+          mkdir -p "$SIGN_DIR"
+
+          P12_ORIGINAL="$SIGN_DIR/original.p12"
+          P12_PEM="$SIGN_DIR/p12.pem"
+          P12_APPLE="$SIGN_DIR/apple-compatible.p12"
+          MAIN_PROFILE="$SIGN_DIR/main.mobileprovision"
+          NSE_PROFILE="$SIGN_DIR/notification.mobileprovision"
+          MAIN_PLIST="$SIGN_DIR/main.plist"
+          NSE_PLIST="$SIGN_DIR/notification.plist"
+
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | base64 -D > "$P12_ORIGINAL"
+          printf '%s' "$IOS_MAIN_PROFILE_BASE64" | base64 -D > "$MAIN_PROFILE"
+          printf '%s' "$IOS_NOTIFICATION_PROFILE_BASE64" | base64 -D > "$NSE_PROFILE"
+
+          openssl pkcs12             -in "$P12_ORIGINAL"             -passin env:IOS_CERTIFICATE_PASSWORD             -nodes             -out "$P12_PEM"
+
+          grep -Eq 'BEGIN (PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY)' "$P12_PEM"
+          grep -q 'BEGIN CERTIFICATE' "$P12_PEM"
+
+          # macOS security import is most reliable with the legacy PKCS#12 encoding.
+          openssl pkcs12             -export             -legacy             -in "$P12_PEM"             -out "$P12_APPLE"             -name "HomeAssistant Kiosk Development"             -passout env:IOS_CERTIFICATE_PASSWORD
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+
+          security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$P12_APPLE"             -k "$KEYCHAIN_PATH"             -P "$IOS_CERTIFICATE_PASSWORD"             -T /usr/bin/codesign             -T /usr/bin/security
+
+          security set-key-partition-list             -S apple-tool:,apple:             -s             -k "$KEYCHAIN_PASSWORD"             "$KEYCHAIN_PATH" >/dev/null
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          SIGNING_SHA="$(
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"               | awk '/Apple Development/ {print $2; exit}'
+          )"
+
+          if [ -z "$SIGNING_SHA" ]; then
+            echo "::error::No Apple Development identity found"
+            exit 1
+          fi
+
+          security cms -D -i "$MAIN_PROFILE" > "$MAIN_PLIST"
+          security cms -D -i "$NSE_PROFILE" > "$NSE_PLIST"
+
+          python3 -             "$MAIN_PLIST"             "$NSE_PLIST"             "$SIGNING_SHA"             "$MAIN_BUNDLE_ID"             "$NOTIFICATION_BUNDLE_ID"             "$APP_GROUP_ID"             "$TEAM_ID" <<'PY'
+          import datetime
+          import hashlib
+          import plistlib
+          import sys
+
+          main_path, nse_path, signing_sha, main_id, nse_id, app_group, expected_team = sys.argv[1:]
+
+          def load(path):
+              with open(path, "rb") as f:
+                  return plistlib.load(f)
+
+          def cert_shas(profile):
+              return [
+                  hashlib.sha1(cert).hexdigest().upper()
+                  for cert in profile.get("DeveloperCertificates", [])
+              ]
+
+          def entitlement_pattern_allows(pattern, value):
+              if pattern == value:
+                  return True
+              if isinstance(pattern, str) and pattern.endswith("*"):
+                  return value.startswith(pattern[:-1])
+              return False
+
+          def validate(profile, bundle_id, require_push):
+              name = profile.get("Name", "<unnamed>")
+              team = (profile.get("TeamIdentifier") or [None])[0]
+              ent = profile.get("Entitlements", {})
+              expiry = profile.get("ExpirationDate")
+
+              if team != expected_team:
+                  raise SystemExit(f"ERROR: {name}: Team {team!r} != {expected_team!r}")
+
+              expected_app_id = f"{expected_team}.{bundle_id}"
+              if ent.get("application-identifier") != expected_app_id:
+                  raise SystemExit(
+                      f"ERROR: {name}: application-identifier mismatch: "
+                      f"{ent.get('application-identifier')!r} != {expected_app_id!r}"
+                  )
+
+              groups = ent.get("com.apple.security.application-groups", [])
+              if app_group not in groups:
+                  raise SystemExit(f"ERROR: {name}: missing App Group {app_group}")
+
+              keychain = ent.get("keychain-access-groups", [])
+              expected_keychain = f"{expected_team}.{main_id}"
+
+              if not any(
+                  entitlement_pattern_allows(pattern, expected_keychain)
+                  for pattern in keychain
+              ):
+                  raise SystemExit(
+                      f"ERROR: {name}: keychain group {expected_keychain!r} "
+                      f"is not authorized by profile groups {keychain!r}"
+                  )
+
+              print(f"  keychain authorization: {keychain!r} -> {expected_keychain!r}")
+
+              if require_push and ent.get("aps-environment") != "development":
+                  raise SystemExit(f"ERROR: {name}: aps-environment is not development")
+
+              if not ent.get("get-task-allow", False):
+                  raise SystemExit(f"ERROR: {name}: get-task-allow is not true")
+
+              if signing_sha.upper() not in cert_shas(profile):
+                  raise SystemExit(
+                      f"ERROR: {name}: signing certificate not contained in profile; "
+                      f"profile certs={cert_shas(profile)}"
+                  )
+
+              if not expiry:
+                  raise SystemExit(f"ERROR: {name}: no expiration date")
+
+              now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+              if expiry <= now:
+                  raise SystemExit(f"ERROR: {name}: profile expired at {expiry}")
+
+              devices = profile.get("ProvisionedDevices", [])
+              if not devices:
+                  raise SystemExit(f"ERROR: {name}: no ProvisionedDevices")
+
+              print(f"{name}: OK")
+              print(f"  UUID: {profile.get('UUID')}")
+              print(f"  expires: {expiry}")
+              print(f"  devices: {len(devices)}")
+
+          main = load(main_path)
+          nse = load(nse_path)
+          validate(main, main_id, True)
+          validate(nse, nse_id, False)
+          PY
+
+          MAIN_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$MAIN_PLIST")"
+          NSE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$NSE_PLIST")"
+          MAIN_PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$MAIN_PLIST")"
+          NSE_PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$NSE_PLIST")"
+
+          if [ -z "$MAIN_PROFILE_NAME" ] || [ -z "$NSE_PROFILE_NAME" ]; then
+            echo "::error::Could not read provisioning profile names"
+            exit 1
+          fi
+
+          CURRENT_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          LEGACY_PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+
+          mkdir -p "$CURRENT_PROFILE_DIR" "$LEGACY_PROFILE_DIR"
+
+          cp "$MAIN_PROFILE" "$CURRENT_PROFILE_DIR/$MAIN_UUID.mobileprovision"
+          cp "$NSE_PROFILE" "$CURRENT_PROFILE_DIR/$NSE_UUID.mobileprovision"
+          cp "$MAIN_PROFILE" "$LEGACY_PROFILE_DIR/$MAIN_UUID.mobileprovision"
+          cp "$NSE_PROFILE" "$LEGACY_PROFILE_DIR/$NSE_UUID.mobileprovision"
+
+          echo "SIGNING_CERT_SHA1=$SIGNING_SHA" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "MAIN_PROFILE_UUID=$MAIN_UUID" >> "$GITHUB_ENV"
+          echo "NSE_PROFILE_UUID=$NSE_UUID" >> "$GITHUB_ENV"
+          echo "MAIN_PROFILE_NAME=$MAIN_PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "NSE_PROFILE_NAME=$NSE_PROFILE_NAME" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Provisioning profiles selected from secrets:"
+          echo "  Main: $MAIN_PROFILE_NAME ($MAIN_UUID)"
+          echo "  NSE:  $NSE_PROFILE_NAME ($NSE_UUID)"
+
+          echo ""
+          echo "Installed signing identity:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          echo ""
+          echo "Installed profiles:"
+          ls -l "$CURRENT_PROFILE_DIR"
 
       - name: Resolve Swift packages
-        run: >-
-          xcodebuild -resolvePackageDependencies
-          -project HomeAssistant.xcodeproj
-          -scheme App-Release
-
-      - name: Build unsigned iOS app for Sideloadly
+        shell: bash
         run: |
           set -euo pipefail
-          rm -rf build/kiosk
-          mkdir -p build/kiosk/Payload
+
+          PACKAGE_DIR="$PWD/build/SourcePackages"
+          mkdir -p "$PACKAGE_DIR"
+
+          max_attempts=4
+
+          for attempt in 1 2 3 4; do
+            echo ""
+            echo "SwiftPM resolve attempt $attempt/$max_attempts..."
+
+            if xcodebuild \
+              -project HomeAssistant.xcodeproj \
+              -scheme App-Release \
+              -clonedSourcePackagesDirPath "$PACKAGE_DIR" \
+              -resolvePackageDependencies
+            then
+              echo "Swift package resolution succeeded."
+              break
+            fi
+
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::Swift package resolution failed after $max_attempts attempts"
+              exit 1
+            fi
+
+            wait_seconds=$((attempt * 20))
+            echo "::warning::Swift package resolution failed; retrying in $wait_seconds seconds..."
+            sleep "$wait_seconds"
+          done
+
+      - name: Verify effective Xcode signing settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMMON_ARGS=(
+            -project HomeAssistant.xcodeproj
+            -configuration Release
+            -sdk iphoneos
+            -clonedSourcePackagesDirPath "$PWD/build/SourcePackages"
+            -disableAutomaticPackageResolution
+            DEVELOPMENT_TEAM="$TEAM_ID"
+            BUNDLE_ID_PREFIX="de.weber-schubert"
+            BUNDLE_ID_SUFFIX=".kiosk"
+            CODE_SIGN_IDENTITY="Apple Development"
+            CODE_SIGN_STYLE_DEFAULT="Manual"
+            KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME"
+            KIOSK_NSE_PROFILE_NAME="$NSE_PROFILE_NAME"
+          )
+
+          APP_SETTINGS="$PWD/build/app-build-settings.txt"
+          NSE_SETTINGS="$PWD/build/nse-build-settings.txt"
+
+          xcodebuild "${COMMON_ARGS[@]}" \
+            -target App \
+            -showBuildSettings > "$APP_SETTINGS"
+
+          xcodebuild "${COMMON_ARGS[@]}" \
+            -target Extensions-NotificationService \
+            -showBuildSettings > "$NSE_SETTINGS"
+
+          python3 - "$APP_SETTINGS" "$NSE_SETTINGS" "$MAIN_PROFILE_NAME" "$NSE_PROFILE_NAME" <<'PY'
+          import sys
+
+          app_path, nse_path, main_profile_name, nse_profile_name = sys.argv[1:]
+
+          def parse(path):
+              values = {}
+              with open(path, encoding="utf-8") as f:
+                  for raw in f:
+                      line = raw.strip()
+                      if " = " not in line:
+                          continue
+                      key, value = line.split(" = ", 1)
+                      values[key.strip()] = value.strip()
+              return values
+
+          app = parse(app_path)
+          nse = parse(nse_path)
+
+          expected = {
+              "app team": (app.get("DEVELOPMENT_TEAM"), "QKSPJURFCD"),
+              "app bundle": (
+                  app.get("PRODUCT_BUNDLE_IDENTIFIER"),
+                  "de.weber-schubert.homeassistant.kiosk",
+              ),
+              "app icon": (
+                  app.get("ASSETCATALOG_COMPILER_APPICON_NAME"),
+                  "AppIcon",
+              ),
+              "app profile": (
+                  app.get("PROVISIONING_PROFILE_SPECIFIER"),
+                  main_profile_name,
+              ),
+              "app signing style": (app.get("CODE_SIGN_STYLE"), "Manual"),
+              "NSE team": (nse.get("DEVELOPMENT_TEAM"), "QKSPJURFCD"),
+              "NSE bundle": (
+                  nse.get("PRODUCT_BUNDLE_IDENTIFIER"),
+                  "de.weber-schubert.homeassistant.kiosk.APNSAttachmentService",
+              ),
+              "NSE profile": (
+                  nse.get("PROVISIONING_PROFILE_SPECIFIER"),
+                  nse_profile_name,
+              ),
+              "NSE signing style": (nse.get("CODE_SIGN_STYLE"), "Manual"),
+          }
+
+          failed = False
+          print("Effective Xcode signing settings:")
+          for label, (actual, wanted) in expected.items():
+              status = "OK" if actual == wanted else "ERROR"
+              print(f"  {status:5} {label}: {actual!r}")
+              if actual != wanted:
+                  print(f"        expected: {wanted!r}")
+                  failed = True
+
+          if failed:
+              raise SystemExit("ERROR: Effective Xcode signing settings are not kiosk-safe")
+          PY
+
+          echo ""
+          echo "Effective Release kiosk signing settings verified."
+
+      # -------------------------------------------------------------------
+      # Xcode performs the actual signing while archiving. This avoids the
+      # post-build codesign path that iPadOS 26 rejected with 0xe8008001.
+      # -------------------------------------------------------------------
+      - name: Archive signed kiosk app with Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$PWD/build"
 
           xcodebuild \
             -project HomeAssistant.xcodeproj \
             -scheme App-Release \
             -configuration Release \
-            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build/kiosk/DerivedData \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+            -archivePath "$PWD/build/HomeAssistant-Kiosk.xcarchive" \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            -clonedSourcePackagesDirPath "$PWD/build/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            BUNDLE_ID_PREFIX="de.weber-schubert" \
+            BUNDLE_ID_SUFFIX=".kiosk" \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            CODE_SIGN_STYLE_DEFAULT="Manual" \
+            KIOSK_MAIN_PROFILE_NAME="$MAIN_PROFILE_NAME" \
+            KIOSK_NSE_PROFILE_NAME="$NSE_PROFILE_NAME" \
+            ENABLE_DEBUG_DYLIB=NO \
+            archive \
+            | tee "$PWD/build/xcodebuild-archive.log"
 
-          APP_PATH=$(find build/kiosk/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::No iOS .app bundle found"
+      - name: Validate signed archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$PWD/build/HomeAssistant-Kiosk.xcarchive"
+
+          APP="$(
+            find "$ARCHIVE/Products/Applications"               -maxdepth 1               -type d               -name '*.app'               -print               -quit
+          )"
+
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::Archived app not found"
+            find "$ARCHIVE" -maxdepth 4 -print || true
             exit 1
           fi
 
-          echo "Packaging $APP_PATH"
-          cp -R "$APP_PATH" build/kiosk/Payload/
-          cd build/kiosk
-          /usr/bin/zip -qry "../HA-Kiosk-unsigned.ipa" Payload
+          MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+          [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || {
+            echo "::error::Main bundle ID is $MAIN_ID"
+            exit 1
+          }
 
-      - name: Dump version information
-        if: always()
-        run: cat Configuration/Version.xcconfig
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")"
 
-      - name: Upload iOS IPA
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+          [ "$EXECUTABLE" = "HomeAssistant" ] || {
+            echo "::error::Unexpected CFBundleExecutable: $EXECUTABLE"
+            exit 1
+          }
+
+          [ -f "$APP/$EXECUTABLE" ] && [ -x "$APP/$EXECUTABLE" ] || {
+            echo "::error::Bundle executable is missing or not executable: $APP/$EXECUTABLE"
+            find "$APP" -maxdepth 1 -type f -print || true
+            exit 1
+          }
+
+          APP_BASENAME="$(basename "$APP")"
+
+          python3 - "$APP_BASENAME" "$EXECUTABLE" <<'PY'
+          import sys
+
+          app_bundle, executable = sys.argv[1:3]
+
+          for label, value in (
+              ("app bundle", app_bundle),
+              ("executable", executable),
+          ):
+              try:
+                  value.encode("ascii")
+              except UnicodeEncodeError:
+                  raise SystemExit(
+                      f"ERROR: Non-ASCII {label} name: {value!r}"
+                  )
+
+          print("ASCII bundle/executable validation: OK")
+          PY
+
+          echo "Archive executable check:"
+          echo "  App bundle:   $APP_BASENAME"
+          echo "  Executable:   $EXECUTABLE"
+          echo "  Display name: $DISPLAY_NAME"
+
+          APPEX_COUNT="$(
+            find "$APP/PlugIns" \
+              -maxdepth 1 \
+              -type d \
+              -name '*.appex' \
+              -print 2>/dev/null \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          if [ "$APPEX_COUNT" -ne 1 ]; then
+            echo "::error::Expected exactly one embedded extension, found $APPEX_COUNT"
+            find "$APP/PlugIns" -maxdepth 1 -type d -name '*.appex' -print 2>/dev/null || true
+            exit 1
+          fi
+
+          NSE="$(
+            find "$APP/PlugIns" \
+              -maxdepth 1 \
+              -type d \
+              -name '*.appex' \
+              -print \
+              -quit
+          )"
+          NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
+          [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || {
+            echo "::error::Notification extension bundle ID is $NSE_ID"
+            exit 1
+          }
+
+          EXT_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$NSE/Info.plist")"
+          [ "$EXT_POINT" = "com.apple.usernotifications.service" ] || {
+            echo "::error::Unexpected extension point: $EXT_POINT"
+            exit 1
+          }
+
+          [ ! -d "$APP/Watch" ] || {
+            echo "::error::Watch content unexpectedly embedded"
+            exit 1
+          }
+
+          [ -f "$APP/GoogleService-Info-Release.plist" ] || {
+            echo "::error::Custom Firebase plist missing"
+            exit 1
+          }
+
+          FIREBASE_PROJECT="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$APP/GoogleService-Info-Release.plist")"
+          FIREBASE_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' "$APP/GoogleService-Info-Release.plist")"
+
+          [ "$FIREBASE_PROJECT" = "homeassistant-kiosk" ] || {
+            echo "::error::Unexpected Firebase project: $FIREBASE_PROJECT"
+            exit 1
+          }
+
+          [ "$FIREBASE_BUNDLE" = "$MAIN_BUNDLE_ID" ] || {
+            echo "::error::Firebase bundle ID mismatch: $FIREBASE_BUNDLE"
+            exit 1
+          }
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          codesign -d --entitlements :- "$APP" > "$PWD/build/main-entitlements.plist" 2>/dev/null
+          codesign -d --entitlements :- "$NSE" > "$PWD/build/nse-entitlements.plist" 2>/dev/null
+
+          python3 -             "$PWD/build/main-entitlements.plist"             "$PWD/build/nse-entitlements.plist"             "$MAIN_BUNDLE_ID"             "$NOTIFICATION_BUNDLE_ID"             "$APP_GROUP_ID"             "$TEAM_ID" <<'PY'
+          import plistlib
+          import sys
+
+          main_path, nse_path, main_id, nse_id, app_group, team = sys.argv[1:]
+
+          def load(path):
+              with open(path, "rb") as f:
+                  return plistlib.load(f)
+
+          main = load(main_path)
+          nse = load(nse_path)
+
+          checks = [
+              (main.get("application-identifier") == f"{team}.{main_id}", "main application-identifier"),
+              (main.get("com.apple.developer.team-identifier") == team, "main team identifier"),
+              (main.get("aps-environment") == "development", "main aps-environment"),
+              (app_group in main.get("com.apple.security.application-groups", []), "main App Group"),
+              (f"{team}.{main_id}" in main.get("keychain-access-groups", []), "main keychain group"),
+              (nse.get("application-identifier") == f"{team}.{nse_id}", "NSE application-identifier"),
+              (app_group in nse.get("com.apple.security.application-groups", []), "NSE App Group"),
+              (f"{team}.{main_id}" in nse.get("keychain-access-groups", []), "NSE keychain group"),
+          ]
+
+          failed = [name for ok, name in checks if not ok]
+          if failed:
+              raise SystemExit("ERROR: Signed entitlement verification failed: " + ", ".join(failed))
+
+          print("Signed entitlements verified.")
+          PY
+
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+          echo "NSE_PATH=$NSE" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "Archived app:"
+          echo "$APP"
+
+          echo ""
+          echo "Main signature:"
+          codesign -dvvv "$APP" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=' || true
+
+          echo ""
+          echo "Notification Service signature:"
+          codesign -dvvv "$NSE" 2>&1 | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=' || true
+
+      # -------------------------------------------------------------------
+      # Use Xcode's distribution pipeline as well. Xcode 26 uses the
+      # "debugging" export method (the old "development" name is deprecated).
+      # -------------------------------------------------------------------
+      # -------------------------------------------------------------------
+      # A/B diagnostic for iPadOS code-signature validation:
+      #
+      #   A = package the already signed .app from the xcarchive directly.
+      #   B = let xcodebuild -exportArchive produce the IPA.
+      #
+      # Both variants originate from the exact same archive/signing material.
+      # -------------------------------------------------------------------
+
+      - name: Preserve reusable signed HomeAssistant app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SIGNED_APP_TARBALL="$PWD/build/HomeAssistant-signed.app.tar.gz"
+
+          [ -d "$APP_PATH" ] || {
+            echo "::error::Signed HomeAssistant.app not found: $APP_PATH"
+            exit 1
+          }
+
+          rm -f "$SIGNED_APP_TARBALL"
+
+          # Downstream packaging only needs the already signed .app, not the
+          # complete xcarchive. tar.gz preserves executable bits and symlinks.
+          tar -czf "$SIGNED_APP_TARBALL" \
+            -C "$(dirname "$APP_PATH")" \
+            "$(basename "$APP_PATH")"
+
+          [ -s "$SIGNED_APP_TARBALL" ] || {
+            echo "::error::Signed app tarball was not created"
+            exit 1
+          }
+
+          echo "Reusable signed app artifact:"
+          ls -lh "$SIGNED_APP_TARBALL"
+          shasum -a 256 "$SIGNED_APP_TARBALL"
+
+          echo "SIGNED_APP_TARBALL=$SIGNED_APP_TARBALL" >> "$GITHUB_ENV"
+
+      - name: Upload reusable signed HomeAssistant app
+        uses: actions/upload-artifact@v4
         with:
-          name: ha-kiosk-unsigned.ipa
-          path: build/HA-Kiosk-unsigned.ipa
+          name: HomeAssistant-Native-Kiosk-Audio-signed-app
+          path: build/HomeAssistant-signed.app.tar.gz
           if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+      - name: Upload archive build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: NativeKioskAudio-xcode-archive-log
+          path: build/xcodebuild-archive.log
+          if-no-files-found: ignore
+          retention-days: 30
+          overwrite: true
+
+      - name: Cleanup signing material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1
+          fi
+
+          CURRENT_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          LEGACY_PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+
+          if [ -n "${MAIN_PROFILE_UUID:-}" ]; then
+            rm -f "$CURRENT_PROFILE_DIR/$MAIN_PROFILE_UUID.mobileprovision"
+            rm -f "$LEGACY_PROFILE_DIR/$MAIN_PROFILE_UUID.mobileprovision"
+          fi
+
+          if [ -n "${NSE_PROFILE_UUID:-}" ]; then
+            rm -f "$CURRENT_PROFILE_DIR/$NSE_PROFILE_UUID.mobileprovision"
+            rm -f "$LEGACY_PROFILE_DIR/$NSE_PROFILE_UUID.mobileprovision"
+          fi
+
+          rm -rf "$RUNNER_TEMP/kiosk-signing"
+
+  package:
+    name: Package final kiosk IPA
+    needs: archive
+    if: ${{ always() && (needs.archive.result == 'success' || needs.archive.result == 'skipped') }}
+    runs-on: macos-26
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve reusable archive run
+        id: archive_source
+        shell: bash
+        env:
+          REUSE_RUN_ID: ${{ inputs.archive_run_id }}
+          ARCHIVE_JOB_RESULT: ${{ needs.archive.result }}
+        run: |
+          set -euo pipefail
+
+          if [ "$ARCHIVE_JOB_RESULT" = "success" ]; then
+            SOURCE_RUN_ID="$GITHUB_RUN_ID"
+            SOURCE_MODE="current-run"
+          else
+            SOURCE_RUN_ID="${REUSE_RUN_ID:-}"
+            SOURCE_MODE="reused-run"
+          fi
+
+          if [ -z "$SOURCE_RUN_ID" ]; then
+            echo "::error::No reusable archive run ID is available"
+            exit 1
+          fi
+
+          case "$SOURCE_RUN_ID" in
+            *[!0-9]*)
+              echo "::error::archive_run_id must contain digits only: $SOURCE_RUN_ID"
+              exit 1
+              ;;
+          esac
+
+          echo "run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "mode=$SOURCE_MODE" >> "$GITHUB_OUTPUT"
+
+          echo "Archive source:"
+          echo "  mode:   $SOURCE_MODE"
+          echo "  run ID: $SOURCE_RUN_ID"
+
+      - name: Download reusable signed HomeAssistant app
+        uses: actions/download-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-signed-app
+          path: build/signed-app-download
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.archive_source.outputs.run_id }}
+
+      - name: Restore signed HomeAssistant app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SIGNED_APP_TARBALL="$PWD/build/signed-app-download/HomeAssistant-signed.app.tar.gz"
+          RESTORE_DIR="$PWD/build/restored"
+
+          [ -s "$SIGNED_APP_TARBALL" ] || {
+            echo "::error::Downloaded signed app tarball is missing"
+            find "$PWD/build/signed-app-download" -maxdepth 2 -print || true
+            exit 1
+          }
+
+          rm -rf "$RESTORE_DIR"
+          mkdir -p "$RESTORE_DIR"
+
+          tar -xzf "$SIGNED_APP_TARBALL" -C "$RESTORE_DIR"
+
+          APP_PATH="$RESTORE_DIR/HomeAssistant.app"
+
+          [ -d "$APP_PATH" ] || {
+            echo "::error::HomeAssistant.app not found after restore"
+            find "$RESTORE_DIR" -maxdepth 3 -print || true
+            exit 1
+          }
+
+          [ -x "$APP_PATH/HomeAssistant" ] || {
+            echo "::error::Restored HomeAssistant executable is not executable"
+            ls -l "$APP_PATH/HomeAssistant" || true
+            exit 1
+          }
+
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+          echo "Restored reusable signed app:"
+          echo "  $APP_PATH"
+          echo "Source tarball SHA-256:"
+          shasum -a 256 "$SIGNED_APP_TARBALL"
+
+      - name: Install packaging signing certificate
+        shell: bash
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in IOS_CERTIFICATE_P12_BASE64 IOS_CERTIFICATE_PASSWORD
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub secret $name is missing or empty"
+              exit 1
+            fi
+          done
+
+          SIGN_DIR="$RUNNER_TEMP/kiosk-package-signing"
+          mkdir -p "$SIGN_DIR"
+
+          P12_ORIGINAL="$SIGN_DIR/original.p12"
+          P12_PEM="$SIGN_DIR/p12.pem"
+          P12_APPLE="$SIGN_DIR/apple-compatible.p12"
+
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | base64 -D > "$P12_ORIGINAL"
+
+          openssl pkcs12 \
+            -in "$P12_ORIGINAL" \
+            -passin env:IOS_CERTIFICATE_PASSWORD \
+            -nodes \
+            -out "$P12_PEM"
+
+          grep -Eq 'BEGIN (PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY)' "$P12_PEM"
+          grep -q 'BEGIN CERTIFICATE' "$P12_PEM"
+
+          openssl pkcs12 \
+            -export \
+            -legacy \
+            -in "$P12_PEM" \
+            -out "$P12_APPLE" \
+            -name "HomeAssistant Kiosk Development" \
+            -passout env:IOS_CERTIFICATE_PASSWORD
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/homeassistant-kiosk-package.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+
+          security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$P12_APPLE" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$IOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" >/dev/null
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          SIGNING_CERT_SHA1="$(
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | awk '/Apple Development/ {print $2; exit}'
+          )"
+
+          if [ -z "$SIGNING_CERT_SHA1" ]; then
+            echo "::error::No Apple Development signing identity found"
+            exit 1
+          fi
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "SIGNING_CERT_SHA1=$SIGNING_CERT_SHA1" >> "$GITHUB_ENV"
+
+          echo "Packaging signing identity:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Validate restored signed app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")"
+          [ "$MAIN_ID" = "$MAIN_BUNDLE_ID" ] || {
+            echo "::error::Unexpected main bundle ID: $MAIN_ID"
+            exit 1
+          }
+
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")"
+          [ "$EXECUTABLE" = "HomeAssistant" ] || {
+            echo "::error::Unexpected executable: $EXECUTABLE"
+            exit 1
+          }
+
+          NSE="$(
+            find "$APP_PATH/PlugIns" \
+              -maxdepth 1 \
+              -type d \
+              -name '*.appex' \
+              -print \
+              -quit
+          )"
+
+          [ -n "$NSE" ] && [ -d "$NSE" ] || {
+            echo "::error::Notification Service extension is missing"
+            exit 1
+          }
+
+          NSE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NSE/Info.plist")"
+          [ "$NSE_ID" = "$NOTIFICATION_BUNDLE_ID" ] || {
+            echo "::error::Unexpected Notification Service bundle ID: $NSE_ID"
+            exit 1
+          }
+
+          [ -f "$APP_PATH/GoogleService-Info-Release.plist" ] || {
+            echo "::error::Firebase configuration is missing"
+            exit 1
+          }
+
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+
+          ARCHIVE_ENT="$PWD/build/archive-entitlements.plist"
+          codesign -d --entitlements :- "$APP_PATH" > "$ARCHIVE_ENT" 2>/dev/null
+          /usr/bin/plutil -lint "$ARCHIVE_ENT"
+
+          python3 - "$ARCHIVE_ENT" "$MAIN_BUNDLE_ID" "$APP_GROUP_ID" "$TEAM_ID" <<'PY'
+          import plistlib
+          import sys
+
+          path, bundle_id, app_group, team = sys.argv[1:]
+          with open(path, "rb") as f:
+              ent = plistlib.load(f)
+
+          expected_app_id = f"{team}.{bundle_id}"
+          expected_keychain = expected_app_id
+
+          checks = [
+              (ent.get("application-identifier") == expected_app_id, "application-identifier"),
+              (ent.get("com.apple.developer.team-identifier") == team, "team identifier"),
+              (ent.get("aps-environment") == "development", "aps-environment"),
+              (app_group in ent.get("com.apple.security.application-groups", []), "App Group"),
+              (expected_keychain in ent.get("keychain-access-groups", []), "keychain group"),
+          ]
+
+          failed = [name for ok, name in checks if not ok]
+          if failed:
+              raise SystemExit(
+                  "ERROR: Restored signed app entitlement validation failed: "
+                  + ", ".join(failed)
+              )
+
+          print("Restored signed app entitlements: OK")
+          PY
+
+      - name: Re-sign outer HomeAssistant app and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_ROOT="$PWD/build/final-package"
+          STAGE="$PACKAGE_ROOT/stage"
+          FINAL_APP="$STAGE/Payload/HomeAssistant.app"
+          FINAL_IPA="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa"
+          ENTITLEMENTS="$PACKAGE_ROOT/main-entitlements.plist"
+          BUILD_INFO="$PWD/build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt"
+
+          rm -rf "$PACKAGE_ROOT"
+          mkdir -p "$STAGE/Payload" "$PWD/build/ipa"
+
+          /usr/bin/ditto "$APP_PATH" "$FINAL_APP"
+
+          codesign -d --entitlements :- "$APP_PATH" > "$ENTITLEMENTS" 2>/dev/null
+          /usr/bin/plutil -lint "$ENTITLEMENTS"
+
+          ORIGINAL_INFO_SHA="$(shasum -a 256 "$APP_PATH/Info.plist" | awk '{print $1}')"
+          ORIGINAL_EXEC_SHA="$(shasum -a 256 "$APP_PATH/HomeAssistant" | awk '{print $1}')"
+
+          echo "Original Xcode outer-app signature:"
+          codesign -dvvv "$APP_PATH" 2>&1 \
+            | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=' \
+            || true
+
+          # Proven working fix from diagnostic variant F:
+          # leave every nested component untouched and re-sign only the outer
+          # HomeAssistant.app using its exact effective entitlements.
+          codesign \
+            --force \
+            --sign "$SIGNING_CERT_SHA1" \
+            --entitlements "$ENTITLEMENTS" \
+            --generate-entitlement-der \
+            --timestamp=none \
+            "$FINAL_APP"
+
+          echo ""
+          echo "Final outer-app signature:"
+          codesign -dvvv "$FINAL_APP" 2>&1 \
+            | grep -E 'Identifier=|TeamIdentifier=|Authority=|CDHash=|CodeDirectory v=|Signature size=' \
+            || true
+
+          codesign --verify --deep --strict --verbose=4 "$FINAL_APP"
+
+          FINAL_INFO_SHA="$(shasum -a 256 "$FINAL_APP/Info.plist" | awk '{print $1}')"
+          FINAL_EXEC_SHA="$(shasum -a 256 "$FINAL_APP/HomeAssistant" | awk '{print $1}')"
+
+          [ "$ORIGINAL_INFO_SHA" = "$FINAL_INFO_SHA" ] || {
+            echo "::error::Outer re-sign changed Info.plist bytes"
+            exit 1
+          }
+
+          FINAL_ENT="$PACKAGE_ROOT/final-entitlements.plist"
+          codesign -d --entitlements :- "$FINAL_APP" > "$FINAL_ENT" 2>/dev/null
+
+          python3 - "$ENTITLEMENTS" "$FINAL_ENT" <<'PY'
+          import plistlib
+          import sys
+
+          before_path, after_path = sys.argv[1:]
+
+          with open(before_path, "rb") as f:
+              before = plistlib.load(f)
+          with open(after_path, "rb") as f:
+              after = plistlib.load(f)
+
+          if before != after:
+              raise SystemExit("ERROR: Entitlements changed during outer-app re-sign")
+
+          print("Outer-app entitlements preserved exactly.")
+          PY
+
+          (
+            cd "$STAGE"
+            /usr/bin/ditto -c -k --keepParent Payload "$FINAL_IPA"
+          )
+
+          [ -s "$FINAL_IPA" ] || {
+            echo "::error::Final IPA was not created"
+            exit 1
+          }
+
+          FINAL_IPA_SHA="$(shasum -a 256 "$FINAL_IPA" | awk '{print $1}')"
+
+          MAIN_PROFILE="$PACKAGE_ROOT/main-profile.plist"
+          security cms -D -i "$FINAL_APP/embedded.mobileprovision" > "$MAIN_PROFILE"
+
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$MAIN_PROFILE")"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$MAIN_PROFILE")"
+          APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$FINAL_APP/Info.plist")"
+          BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$FINAL_APP/Info.plist")"
+
+          {
+            echo "HomeAssistant Native Kiosk Audio - Production Release Build"
+            echo "============================================================="
+            echo
+            echo "Build configuration:       Release"
+            echo "Packaging run:             $GITHUB_RUN_ID"
+            echo "Source archive run:        ${{ steps.archive_source.outputs.run_id }}"
+            echo "Archive source mode:       ${{ steps.archive_source.outputs.mode }}"
+            echo "App version:               $APP_VERSION ($BUILD_VERSION)"
+            echo "Bundle ID:                 $MAIN_BUNDLE_ID"
+            echo "Team ID:                   $TEAM_ID"
+            echo "Signing certificate SHA1:  $SIGNING_CERT_SHA1"
+            echo "Provisioning profile:      $PROFILE_NAME"
+            echo "Provisioning profile UUID: $PROFILE_UUID"
+            echo "Original Info.plist SHA:   $ORIGINAL_INFO_SHA"
+            echo "Final Info.plist SHA:      $FINAL_INFO_SHA"
+            echo "Original executable SHA:   $ORIGINAL_EXEC_SHA"
+            echo "Final executable SHA:      $FINAL_EXEC_SHA"
+            echo "Final IPA SHA-256:         $FINAL_IPA_SHA"
+            echo "Nested code:               unchanged Xcode signatures"
+            echo "Outer app:                 manually re-signed"
+            echo "Verification:              SUCCESS"
+          } | tee "$BUILD_INFO"
+
+          {
+            echo "## Production Native Kiosk Audio IPA"
+            echo
+            echo "| Check | Value |"
+            echo "|---|---|"
+            printf '| Source archive run | `%s` |\n' "${{ steps.archive_source.outputs.run_id }}"
+            printf '| Source mode | `%s` |\n' "${{ steps.archive_source.outputs.mode }}"
+            printf '| Bundle ID | `%s` |\n' "$MAIN_BUNDLE_ID"
+            printf '| Team ID | `%s` |\n' "$TEAM_ID"
+            printf '| Provisioning profile | `%s` |\n' "$PROFILE_NAME"
+            printf '| Info.plist preserved | `YES` |\n'
+            printf '| Entitlements preserved | `YES` |\n'
+            printf '| codesign verification | `SUCCESS` |\n'
+            printf '| IPA SHA-256 | `%s` |\n' "$FINAL_IPA_SHA"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload final signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeAssistant-Native-Kiosk-Audio-signed
+          path: |
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-signed.ipa
+            build/ipa/HomeAssistant-Native-Kiosk-Audio-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Cleanup packaging signing material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1
+          fi
+
+          rm -rf "$RUNNER_TEMP/kiosk-package-signing"
 
