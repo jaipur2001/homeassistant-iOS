@@ -46,8 +46,13 @@ final class CameraOverlayPresenter {
             isDismissing = false
         }
 
-        guard !isDisplaying(camera, on: webViewController) else {
-            Current.Log.info("Camera \(entityId) is already on display, ignoring show request")
+        if isDisplaying(camera, on: webViewController) {
+            Current.Log.info("Camera \(entityId) is already on display, rebuilding stream on repeated show request")
+            pendingShow = { [weak self, weak webViewController] in
+                guard let webViewController else { return }
+                self?.show(entityId: entityId, server: server, cameraName: cameraName, on: webViewController)
+            }
+            hide(on: webViewController)
             return
         }
 
