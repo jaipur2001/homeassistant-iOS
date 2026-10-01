@@ -122,6 +122,14 @@ private class MJPEGStreamViewController: UIViewController {
     private var streamer: MJPEGStreamer?
     private let imageView = UIImageView()
     private var hasReceivedFirstFrame = false
+    private var lastFrameDate: Date?
+    private var watchdogTimer: Timer?
+    private var reconnectWorkItem: DispatchWorkItem?
+    private var streamGeneration = UUID()
+
+    private let watchdogInterval: TimeInterval = 2
+    private let frameTimeout: TimeInterval = 6
+    private let reconnectDelay: TimeInterval = 1
 
     init(
         server: Server,
@@ -140,7 +148,8 @@ private class MJPEGStreamViewController: UIViewController {
     }
 
     deinit {
-        streamer?.cancel()
+        stopStreaming()
+        NotificationCenter.default.removeObserver(self)
     }
 
     override func viewDidLoad() {
@@ -160,43 +169,146 @@ private class MJPEGStreamViewController: UIViewController {
             imageView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        startStreaming()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+
+        startStreaming(reason: "initial")
     }
 
-    private func startStreaming() {
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        stopStreaming()
+    }
+
+    @objc private func appDidBecomeActive() {
+        guard viewIfLoaded?.window != nil else { return }
+        Current.Log.info("MJPEG camera \(cameraEntityId) foregrounded, restarting stream")
+        startStreaming(reason: "app-foreground")
+    }
+
+    private func startStreaming(reason: String) {
+        stopStreaming(keepImage: true)
+
         guard let api = Current.api(for: server) else {
             coordinator?.didEncounterError(StreamError.unableToConnect)
+            scheduleReconnect(reason: "api-unavailable")
             return
         }
+
+        let generation = UUID()
+        streamGeneration = generation
+        hasReceivedFirstFrame = false
+        lastFrameDate = Date()
+
+        Current.Log.info("Starting MJPEG camera \(cameraEntityId), reason=\(reason), generation=\(generation)")
+
+        startWatchdog(for: generation)
 
         Task { [weak self] in
             guard let self else { return }
 
             guard let baseURL = await api.server.activeURL() else {
-                coordinator?.didEncounterError(StreamError.unableToConnect)
+                await MainActor.run {
+                    guard self.streamGeneration == generation else { return }
+                    self.coordinator?.didEncounterError(StreamError.unableToConnect)
+                    self.scheduleReconnect(reason: "no-active-url")
+                }
                 return
             }
 
-            let mjpegURL = baseURL.appendingPathComponent("api/camera_proxy_stream/\(cameraEntityId)")
+            guard streamGeneration == generation else { return }
 
-            // Create streamer once and keep it for the lifetime of this view controller
+            let mjpegURL = baseURL.appendingPathComponent("api/camera_proxy_stream/\(cameraEntityId)")
             let videoStreamer = api.VideoStreamer()
             streamer = videoStreamer
 
             videoStreamer.streamImages(fromURL: mjpegURL) { [weak self] image, error in
-                guard let self else { return }
+                guard let self, self.streamGeneration == generation else { return }
 
                 if let image {
-                    imageView.image = image
-                    if !hasReceivedFirstFrame {
-                        hasReceivedFirstFrame = true
-                        coordinator?.didReceiveFirstFrame()
+                    self.lastFrameDate = Date()
+                    self.imageView.image = image
+
+                    if !self.hasReceivedFirstFrame {
+                        self.hasReceivedFirstFrame = true
+                        self.coordinator?.didReceiveFirstFrame()
+                        Current.Log.info("MJPEG camera \(self.cameraEntityId) received first frame")
                     }
                 } else if let error {
-                    Current.Log.error("MJPEG stream error: \(error.localizedDescription)")
-                    coordinator?.didEncounterError(error)
+                    Current.Log.error(
+                        "MJPEG camera \(self.cameraEntityId) stream error: \(error.localizedDescription)"
+                    )
+                    self.scheduleReconnect(reason: "stream-error")
                 }
             }
+        }
+    }
+
+    private func startWatchdog(for generation: UUID) {
+        watchdogTimer?.invalidate()
+
+        let timer = Timer(timeInterval: watchdogInterval, repeats: true) { [weak self] _ in
+            guard let self, streamGeneration == generation else { return }
+            guard viewIfLoaded?.window != nil else { return }
+
+            let age = Date().timeIntervalSince(lastFrameDate ?? .distantPast)
+            guard age >= frameTimeout else { return }
+
+            Current.Log.warning(
+                "MJPEG camera \(cameraEntityId) watchdog detected stale stream after \(age)s"
+            )
+            scheduleReconnect(reason: "frame-timeout")
+        }
+
+        watchdogTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func scheduleReconnect(reason: String) {
+        guard viewIfLoaded?.window != nil else { return }
+        guard reconnectWorkItem == nil else { return }
+
+        streamer?.cancel()
+        streamer = nil
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+
+        Current.Log.info(
+            "Scheduling MJPEG camera \(cameraEntityId) reconnect in \(reconnectDelay)s, reason=\(reason)"
+        )
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            reconnectWorkItem = nil
+            guard viewIfLoaded?.window != nil else { return }
+            startStreaming(reason: "automatic-reconnect:\(reason)")
+        }
+
+        reconnectWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDelay, execute: item)
+    }
+
+    private func stopStreaming(keepImage: Bool = false) {
+        streamGeneration = UUID()
+
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+
+        streamer?.cancel()
+        streamer = nil
+
+        lastFrameDate = nil
+        hasReceivedFirstFrame = false
+
+        if !keepImage {
+            imageView.image = nil
         }
     }
 
