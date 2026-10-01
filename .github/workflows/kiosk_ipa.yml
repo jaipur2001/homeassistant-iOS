@@ -10,8 +10,6 @@ on:
   push:
     branches:
       - kiosk-recovery-signals
-    paths-ignore:
-      - ".github/workflows/kiosk_ipa.yml"
 
 permissions:
   contents: read
