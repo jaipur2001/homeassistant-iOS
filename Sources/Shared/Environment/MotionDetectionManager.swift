@@ -145,6 +145,7 @@ public class MotionDetectionManager: NSObject {
         var restartCount = 0
         var lastRestartReason = "never"
         var applicationIsActive = true
+        var isRunning = false
     }
 
     private let captureHealth = HAProtected<CaptureHealth>(value: .init())
@@ -244,7 +245,10 @@ public class MotionDetectionManager: NSObject {
                 if self.isCaptureSessionConfigured, !self.captureSession.isRunning {
                     self.previousSamples = nil
                     self.captureSession.startRunning()
-                    self.captureHealth.mutate { $0.lastFrameDate = Date() }
+                    self.captureHealth.mutate {
+                        $0.lastFrameDate = Date()
+                        $0.isRunning = self.captureSession.isRunning
+                    }
                     self.startCaptureWatchdog()
                     Current.Log.info("Motion detection: capture session started")
                 } else if self.isCaptureSessionConfigured {
@@ -259,6 +263,7 @@ public class MotionDetectionManager: NSObject {
         sessionQueue.async { [weak self] in
             guard let self, captureSession.isRunning else { return }
             captureSession.stopRunning()
+            captureHealth.mutate { $0.isRunning = false }
             previousSamples = nil
             Current.Log.info("Motion detection: capture session stopped")
         }
@@ -371,13 +376,17 @@ public class MotionDetectionManager: NSObject {
             guard isCaptureSessionConfigured, wantsRunning else { return }
 
             captureSession.startRunning()
+            captureHealth.mutate {
+                $0.lastFrameDate = Date()
+                $0.isRunning = captureSession.isRunning
+            }
             startCaptureWatchdog()
             Current.Log.info("Motion detection: capture session restarted")
         }
     }
 
     public var captureIsRunning: Bool {
-        sessionQueue.sync { captureSession.isRunning }
+        captureHealth.read { $0.isRunning }
     }
 
     public var secondsSinceLastFrame: Double {
