@@ -151,6 +151,18 @@ public struct LegacyNotificationParserImpl: LegacyNotificationParser {
             payload["media_content_id"] = mediaContentId
         }
 
+        for key in [
+            "alarm_title",
+            "alarm_area",
+            "alarm_source",
+            "alarm_priority",
+            "ack_entity_id",
+        ] {
+            if let value = data[key] {
+                payload[key] = value
+            }
+        }
+
         if let actionData = data["action_data"] {
             payload["homeassistant"] = actionData
             needsCategory = true
