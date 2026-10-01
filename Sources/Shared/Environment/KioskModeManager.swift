@@ -15,6 +15,7 @@ public enum KioskScreensaverCommand: Equatable {
 public final class KioskModeManager: ObservableObject {
     @Published public private(set) var settings: KioskSettings
     @Published public private(set) var isCameraOverlayVisible = false
+    @Published public private(set) var isAlarmOverlayVisible = false
     @Published public private(set) var isScreensaverVisible = false
 
     public var shouldKeepScreenOn: Bool {
@@ -32,6 +33,10 @@ public final class KioskModeManager: ObservableObject {
 
     public var cameraOverlayVisiblePublisher: AnyPublisher<Bool, Never> {
         $isCameraOverlayVisible.eraseToAnyPublisher()
+    }
+
+    public var alarmOverlayVisiblePublisher: AnyPublisher<Bool, Never> {
+        $isAlarmOverlayVisible.eraseToAnyPublisher()
     }
 
     /// Emits the current screensaver visibility and every subsequent change, so the kiosk screensaver
@@ -70,6 +75,10 @@ public final class KioskModeManager: ObservableObject {
 
     public func setCameraOverlayVisible(_ visible: Bool) {
         isCameraOverlayVisible = visible
+    }
+
+    public func setAlarmOverlayVisible(_ visible: Bool) {
+        isAlarmOverlayVisible = visible
     }
 
     /// Called by the screensaver controller whenever the screensaver is shown or dismissed.
