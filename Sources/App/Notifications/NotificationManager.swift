@@ -715,6 +715,10 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             playKioskMedia(command, userInfo: userInfo)
         case .stopMedia:
             stopKioskMedia()
+        case .showAlarm:
+            showKioskAlarm(userInfo: userInfo)
+        case .hideAlarm:
+            hideKioskAlarm()
         case .setScreensaverMode:
             if let mode = command.screensaverMode(from: userInfo) {
                 Current.kiosk.setScreensaverMode(mode)
@@ -732,6 +736,31 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         case .defaultDashboard:
             returnToKioskDefault()
         }
+    }
+
+    private func showKioskAlarm(userInfo: [AnyHashable: Any]) {
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { webViewController in
+                let server = self.cameraServer(from: userInfo, fallback: webViewController.server)
+                let alarm = KioskAlarmPayload(userInfo: userInfo)
+
+                KioskAlarmOverlayPresenter.shared.show(
+                    alarm: alarm,
+                    server: server,
+                    on: webViewController
+                )
+            }.catch { error in
+                Current.Log.error("Failed to show kiosk alarm overlay: \(error)")
+            }
+    }
+
+    private func hideKioskAlarm() {
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { webViewController in
+                KioskAlarmOverlayPresenter.shared.hide(on: webViewController)
+            }.catch { error in
+                Current.Log.error("Failed to hide kiosk alarm overlay: \(error)")
+            }
     }
 
     /// Returns the kiosk to its configured server and dashboard. If the kiosk is pinned to a server
@@ -769,6 +798,237 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
                 rootViewController?.present(hostingController, animated: true, completion: nil)
             })
         }
+    }
+}
+
+private struct KioskAlarmPayload {
+    let title: String
+    let area: String
+    let source: String
+    let priority: Int
+    let acknowledgeEntityId: String
+
+    init(userInfo: [AnyHashable: Any]) {
+        title = Self.string("alarm_title", in: userInfo) ?? "ALARM"
+        area = Self.string("alarm_area", in: userInfo) ?? "Unbekannter Bereich"
+        source = Self.string("alarm_source", in: userInfo) ?? "Unbekannte Alarmquelle"
+        priority = Self.integer("alarm_priority", in: userInfo) ?? 0
+        acknowledgeEntityId = Self.string("ack_entity_id", in: userInfo) ?? "script.alarmansage_quittieren"
+    }
+
+    private static func string(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
+        if let value = userInfo[key] as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return value
+        }
+        if let homeassistant = userInfo["homeassistant"] as? [String: Any],
+           let value = homeassistant[key] as? String,
+           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return value
+        }
+        if let homeassistant = userInfo["homeassistant"] as? [AnyHashable: Any],
+           let value = homeassistant[key] as? String,
+           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return value
+        }
+        return nil
+    }
+
+    private static func integer(_ key: String, in userInfo: [AnyHashable: Any]) -> Int? {
+        if let number = userInfo[key] as? NSNumber {
+            return number.intValue
+        }
+        if let string = userInfo[key] as? String, let value = Int(string) {
+            return value
+        }
+        if let homeassistant = userInfo["homeassistant"] as? [String: Any] {
+            if let number = homeassistant[key] as? NSNumber {
+                return number.intValue
+            }
+            if let string = homeassistant[key] as? String, let value = Int(string) {
+                return value
+            }
+        }
+        if let homeassistant = userInfo["homeassistant"] as? [AnyHashable: Any] {
+            if let number = homeassistant[key] as? NSNumber {
+                return number.intValue
+            }
+            if let string = homeassistant[key] as? String, let value = Int(string) {
+                return value
+            }
+        }
+        return nil
+    }
+}
+
+private final class KioskAlarmOverlayPresenter {
+    static let shared = KioskAlarmOverlayPresenter()
+
+    private weak var overlayController: UIViewController?
+    private var isTransitioning = false
+    private var pendingShow: (() -> Void)?
+
+    private init() {}
+
+    func show(
+        alarm: KioskAlarmPayload,
+        server: Server,
+        on webViewController: WebViewControllerProtocol
+    ) {
+        precondition(Thread.isMainThread)
+
+        let present = { [weak self, weak webViewController] in
+            guard let self, let webViewController else { return }
+            self.present(alarm: alarm, server: server, on: webViewController)
+        }
+
+        if isTransitioning {
+            pendingShow = present
+            return
+        }
+
+        if webViewController.overlayedController != nil {
+            isTransitioning = true
+            pendingShow = present
+            webViewController.dismissOverlayController(animated: false) { [weak self] in
+                guard let self else { return }
+                isTransitioning = false
+                overlayController = nil
+                let deferred = pendingShow
+                pendingShow = nil
+                deferred?()
+            }
+            return
+        }
+
+        present()
+    }
+
+    func hide(on webViewController: WebViewControllerProtocol) {
+        precondition(Thread.isMainThread)
+
+        guard let overlayController,
+              webViewController.overlayedController === overlayController else {
+            self.overlayController = nil
+            return
+        }
+
+        isTransitioning = true
+        webViewController.dismissOverlayController(animated: true) { [weak self] in
+            self?.overlayController = nil
+            self?.isTransitioning = false
+        }
+    }
+
+    private func present(
+        alarm: KioskAlarmPayload,
+        server: Server,
+        on webViewController: WebViewControllerProtocol
+    ) {
+        let controller = KioskAlarmView(
+            alarm: alarm,
+            acknowledge: { [weak self, weak webViewController] in
+                guard let self, let webViewController else { return }
+                self.acknowledge(alarm: alarm, server: server, on: webViewController)
+            }
+        )
+        .embeddedInHostingController()
+
+        controller.modalPresentationStyle = .overFullScreen
+        overlayController = controller
+        webViewController.presentOverlayController(controller: controller, animated: true)
+
+        Current.Log.info(
+            "Kiosk alarm overlay shown: title=\(alarm.title), area=\(alarm.area), " +
+                "source=\(alarm.source), priority=\(alarm.priority)"
+        )
+    }
+
+    private func acknowledge(
+        alarm: KioskAlarmPayload,
+        server: Server,
+        on webViewController: WebViewControllerProtocol
+    ) {
+        guard alarm.acknowledgeEntityId.hasPrefix("script.") else {
+            Current.Log.error(
+                "Kiosk alarm acknowledgement rejected: invalid script entity \(alarm.acknowledgeEntityId)"
+            )
+            return
+        }
+
+        guard let api = Current.api(for: server) else {
+            Current.Log.error("Kiosk alarm acknowledgement failed: no API available")
+            return
+        }
+
+        api.callServiceWithResponse(
+            domain: "script",
+            service: "turn_on",
+            serviceData: ["entity_id": alarm.acknowledgeEntityId],
+            returnResponse: false
+        ).done { [weak self, weak webViewController] _ in
+            DispatchQueue.main.async {
+                guard let self, let webViewController else { return }
+                Current.Log.info("Kiosk alarm acknowledged via \(alarm.acknowledgeEntityId)")
+                self.hide(on: webViewController)
+            }
+        }.catch { error in
+            Current.Log.error("Kiosk alarm acknowledgement failed: \(error)")
+        }
+    }
+}
+
+private struct KioskAlarmView: View {
+    let alarm: KioskAlarmPayload
+    let acknowledge: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.92)
+                .ignoresSafeArea()
+
+            VStack(spacing: 28) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 92, weight: .bold))
+                    .foregroundStyle(.red)
+
+                Text(alarm.title)
+                    .font(.system(size: 54, weight: .black, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .minimumScaleFactor(0.5)
+
+                VStack(spacing: 12) {
+                    Text("Bereich: \(alarm.area)")
+                    Text("Alarmquelle: \(alarm.source)")
+                    if alarm.priority > 0 {
+                        Text("Priorität: \(alarm.priority)")
+                    }
+                }
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white)
+
+                Text("Die akustische Alarmierung ist aktiv.\nBitte Ursache prüfen und anschließend den Alarm quittieren.")
+                    .font(.system(size: 22, weight: .medium, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.top, 8)
+
+                Button(action: acknowledge) {
+                    Label("QUITTIEREN", systemImage: "checkmark.shield.fill")
+                        .font(.system(size: 30, weight: .black, design: .rounded))
+                        .frame(maxWidth: 520)
+                        .padding(.vertical, 22)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+                .padding(.top, 12)
+            }
+            .padding(48)
+            .frame(maxWidth: 900)
+        }
+        .interactiveDismissDisabled(true)
     }
 }
 
