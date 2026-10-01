@@ -156,6 +156,9 @@ public class MotionDetectionManager: NSObject {
     override public init() {
         super.init()
         self.captureDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+        self.captureHealth.mutate {
+            $0.applicationIsActive = UIApplication.shared.applicationState == .active
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -232,6 +235,11 @@ public class MotionDetectionManager: NSObject {
     private func startSession() {
         guard canDetectMotion else { return }
 
+        guard captureHealth.read({ $0.applicationIsActive }) else {
+            Current.Log.info("Motion detection: delaying capture start until application becomes active")
+            return
+        }
+
         checkAuthorization { [weak self] authorized in
             guard let self, authorized else {
                 Current.Log.error("Motion detection: camera access not authorized")
@@ -283,7 +291,8 @@ public class MotionDetectionManager: NSObject {
     @objc private func applicationDidBecomeActive() {
         captureHealth.mutate { $0.applicationIsActive = true }
         if wantsRunning {
-            forceRestartSession(reason: "app-became-active")
+            Current.Log.info("Motion detection: application active, starting pending capture session")
+            startSession()
             // Orientation notifications are suspended in the background, so the device
             // may have been rotated since the session last ran.
             refreshVideoOrientation()
@@ -296,7 +305,7 @@ public class MotionDetectionManager: NSObject {
     }
 
     @objc private func captureSessionInterruptionEnded(_ notification: Notification) {
-        guard wantsRunning else { return }
+        guard wantsRunning, captureHealth.read({ $0.applicationIsActive }) else { return }
         Current.Log.warning("Motion detection: capture session interruption ended, restarting")
         forceRestartSession(reason: "interruption-ended")
     }
@@ -306,7 +315,7 @@ public class MotionDetectionManager: NSObject {
         Current.Log.error(
             "Motion detection: capture session runtime error: \(error?.localizedDescription ?? "unknown")"
         )
-        guard wantsRunning else { return }
+        guard wantsRunning, captureHealth.read({ $0.applicationIsActive }) else { return }
         forceRestartSession(reason: "runtime-error")
     }
 
