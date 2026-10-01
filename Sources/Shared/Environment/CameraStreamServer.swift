@@ -35,6 +35,9 @@ public class CameraStreamServer {
     private let queue = DispatchQueue(label: "camera-stream-server")
     private let encodingQueue = DispatchQueue(label: "camera-stream-encoding")
     private var listener: NWListener?
+    private var listenerRestartWorkItem: DispatchWorkItem?
+    private var listenerRestartCount = 0
+    private var listenerLastRestartReason = "never"
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var active = false
     private var isObservingCamera = false
@@ -58,6 +61,18 @@ public class CameraStreamServer {
 
     public var clientCount: Int {
         queue.sync { connections.count }
+    }
+
+    public var listenerIsRunning: Bool {
+        queue.sync { listener != nil }
+    }
+
+    public var listenerRecoveryCount: Int {
+        queue.sync { listenerRestartCount }
+    }
+
+    public var listenerRecoveryReason: String {
+        queue.sync { listenerLastRestartReason }
     }
 
     /// The URL clients should use to consume the stream, based on the Wi-Fi
@@ -183,9 +198,23 @@ public class CameraStreamServer {
                     self?.setup(connection: connection)
                 }
             }
-            listener.stateUpdateHandler = { state in
-                if case let .failed(error) = state {
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                guard let self else { return }
+
+                switch state {
+                case .ready:
+                    Current.Log.info("Camera stream: listener ready on port \(portValue)")
+                case let .failed(error):
                     Current.Log.error("Camera stream: listener failed: \(error)")
+                    queue.async {
+                        guard self.listener === listener else { return }
+                        self.listener = nil
+                        self.scheduleListenerRestart(reason: "listener-failed")
+                    }
+                case .cancelled:
+                    break
+                default:
+                    break
                 }
             }
             listener.start(queue: queue)
@@ -197,12 +226,37 @@ public class CameraStreamServer {
     }
 
     private func stopListener() {
+        listenerRestartWorkItem?.cancel()
+        listenerRestartWorkItem = nil
         listener?.cancel()
         listener = nil
         for connection in connections.values {
             connection.cancel()
         }
         connections.removeAll()
+    }
+
+    private func scheduleListenerRestart(reason: String) {
+        guard active else { return }
+        guard listenerRestartWorkItem == nil else { return }
+
+        listenerRestartCount += 1
+        listenerLastRestartReason = reason
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            listenerRestartWorkItem = nil
+            guard active, listener == nil else { return }
+
+            Current.Log.warning(
+                "Camera stream: restarting listener, reason=\(reason), count=\(listenerRestartCount)"
+            )
+            startListener()
+            notifyStateChange()
+        }
+
+        listenerRestartWorkItem = item
+        queue.asyncAfter(deadline: .now() + 1, execute: item)
     }
 
     // MARK: - Connections
@@ -427,6 +481,9 @@ public class CameraStreamServer {
     public var isActive: Bool { false }
     public var isStreaming: Bool { false }
     public var clientCount: Int { 0 }
+    public var listenerIsRunning: Bool { false }
+    public var listenerRecoveryCount: Int { 0 }
+    public var listenerRecoveryReason: String { "unsupported" }
     public var port: Int = 8090
     public var streamFrameRate: Double = 15
     public var username: String = ""
