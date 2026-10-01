@@ -157,7 +157,7 @@ public class MotionDetectionManager: NSObject {
         super.init()
         self.captureDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
         self.captureHealth.mutate {
-            $0.applicationIsActive = UIApplication.shared.applicationState == .active
+            $0.applicationIsActive = Current.isForegroundApp()
         }
 
         NotificationCenter.default.addObserver(
