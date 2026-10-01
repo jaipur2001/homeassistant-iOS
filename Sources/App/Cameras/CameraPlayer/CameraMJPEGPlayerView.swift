@@ -194,7 +194,7 @@ private class MJPEGStreamViewController: UIViewController {
         stopStreaming(keepImage: true)
 
         guard let api = Current.api(for: server) else {
-            coordinator?.didEncounterError(StreamError.unableToConnect)
+            Current.Log.error("MJPEG camera \(cameraEntityId) has no Home Assistant API, retrying")
             scheduleReconnect(reason: "api-unavailable")
             return
         }
@@ -214,17 +214,17 @@ private class MJPEGStreamViewController: UIViewController {
             guard let baseURL = await api.server.activeURL() else {
                 await MainActor.run {
                     guard self.streamGeneration == generation else { return }
-                    self.coordinator?.didEncounterError(StreamError.unableToConnect)
+                    Current.Log.error("MJPEG camera \(self.cameraEntityId) has no active server URL, retrying")
                     self.scheduleReconnect(reason: "no-active-url")
                 }
                 return
             }
 
-            guard streamGeneration == generation else { return }
+            guard self.streamGeneration == generation else { return }
 
-            let mjpegURL = baseURL.appendingPathComponent("api/camera_proxy_stream/\(cameraEntityId)")
+            let mjpegURL = baseURL.appendingPathComponent("api/camera_proxy_stream/\(self.cameraEntityId)")
             let videoStreamer = api.VideoStreamer()
-            streamer = videoStreamer
+            self.streamer = videoStreamer
 
             videoStreamer.streamImages(fromURL: mjpegURL) { [weak self] image, error in
                 guard let self, self.streamGeneration == generation else { return }
@@ -252,16 +252,16 @@ private class MJPEGStreamViewController: UIViewController {
         watchdogTimer?.invalidate()
 
         let timer = Timer(timeInterval: watchdogInterval, repeats: true) { [weak self] _ in
-            guard let self, streamGeneration == generation else { return }
-            guard viewIfLoaded?.window != nil else { return }
+            guard let self, self.streamGeneration == generation else { return }
+            guard self.viewIfLoaded?.window != nil else { return }
 
-            let age = Date().timeIntervalSince(lastFrameDate ?? .distantPast)
-            guard age >= frameTimeout else { return }
+            let age = Date().timeIntervalSince(self.lastFrameDate ?? .distantPast)
+            guard age >= self.frameTimeout else { return }
 
             Current.Log.warning(
-                "MJPEG camera \(cameraEntityId) watchdog detected stale stream after \(age)s"
+                "MJPEG camera \(self.cameraEntityId) watchdog detected stale stream after \(age)s"
             )
-            scheduleReconnect(reason: "frame-timeout")
+            self.scheduleReconnect(reason: "frame-timeout")
         }
 
         watchdogTimer = timer
@@ -283,9 +283,9 @@ private class MJPEGStreamViewController: UIViewController {
 
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            reconnectWorkItem = nil
-            guard viewIfLoaded?.window != nil else { return }
-            startStreaming(reason: "automatic-reconnect:\(reason)")
+            self.reconnectWorkItem = nil
+            guard self.viewIfLoaded?.window != nil else { return }
+            self.startStreaming(reason: "automatic-reconnect:\(reason)")
         }
 
         reconnectWorkItem = item
