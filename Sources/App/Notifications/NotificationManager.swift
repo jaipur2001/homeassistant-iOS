@@ -806,6 +806,8 @@ private struct KioskAlarmPayload {
     let area: String
     let source: String
     let priority: Int
+    let message: String
+    let buttonText: String
     let acknowledgeEntityId: String
 
     init(userInfo: [AnyHashable: Any]) {
@@ -813,6 +815,9 @@ private struct KioskAlarmPayload {
         area = Self.string("alarm_area", in: userInfo) ?? "Unbekannter Bereich"
         source = Self.string("alarm_source", in: userInfo) ?? "Unbekannte Alarmquelle"
         priority = Self.integer("alarm_priority", in: userInfo) ?? 0
+        message = Self.string("alarm_message", in: userInfo)
+            ?? "Die akustische Alarmierung ist aktiv.\nBitte Ursache prüfen und anschließend den Alarm quittieren."
+        buttonText = Self.string("alarm_button_text", in: userInfo) ?? "QUITTIEREN"
         acknowledgeEntityId = Self.string("ack_entity_id", in: userInfo) ?? "script.alarmansage_quittieren"
     }
 
@@ -909,6 +914,7 @@ private final class KioskAlarmOverlayPresenter {
         guard let overlayController,
               webViewController.overlayedController === overlayController else {
             self.overlayController = nil
+            Current.kiosk.setAlarmOverlayVisible(false)
             return
         }
 
@@ -916,6 +922,7 @@ private final class KioskAlarmOverlayPresenter {
         webViewController.dismissOverlayController(animated: true) { [weak self] in
             self?.overlayController = nil
             self?.isTransitioning = false
+            Current.kiosk.setAlarmOverlayVisible(false)
         }
     }
 
@@ -935,6 +942,7 @@ private final class KioskAlarmOverlayPresenter {
 
         controller.modalPresentationStyle = .overFullScreen
         overlayController = controller
+        Current.kiosk.setAlarmOverlayVisible(true)
         webViewController.presentOverlayController(controller: controller, animated: true)
 
         Current.Log.info(
@@ -1008,14 +1016,14 @@ private struct KioskAlarmView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white)
 
-                Text("Die akustische Alarmierung ist aktiv.\nBitte Ursache prüfen und anschließend den Alarm quittieren.")
+                Text(alarm.message)
                     .font(.system(size: 22, weight: .medium, design: .rounded))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.white.opacity(0.9))
                     .padding(.top, 8)
 
                 Button(action: acknowledge) {
-                    Label("QUITTIEREN", systemImage: "checkmark.shield.fill")
+                    Label(alarm.buttonText, systemImage: "checkmark.shield.fill")
                         .font(.system(size: 30, weight: .black, design: .rounded))
                         .frame(maxWidth: 520)
                         .padding(.vertical, 22)
