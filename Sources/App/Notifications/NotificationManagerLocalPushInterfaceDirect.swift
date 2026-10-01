@@ -28,6 +28,13 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
                 NotificationCenter.default.removeObserver(token)
             }
         }
+
+        // PerServerContainer is eager by default, so all configured servers
+        // already have a LocalPushManager here. Retry after startup in case
+        // the manager was created before the API/WebSocket became available.
+        DispatchQueue.main.async { [weak self] in
+            self?.retryAllSubscriptions()
+        }
     }
 
     func addObserver(
@@ -41,9 +48,23 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         }
     }
 
-    func retryLocalPush(for server: Server?, reason: LocalPushRetryReason) {}
+    func retryLocalPush(for server: Server?, reason: LocalPushRetryReason) {
+        if let server {
+            localPushManagers[server].retrySubscription()
+        } else {
+            retryAllSubscriptions()
+        }
+    }
 
-    func scheduleAppOpenLocalPushRetries() {}
+    func scheduleAppOpenLocalPushRetries() {
+        retryAllSubscriptions()
+    }
+
+    private func retryAllSubscriptions() {
+        for server in Current.servers.all {
+            localPushManagers[server].retrySubscription()
+        }
+    }
 
     private struct Observer: Equatable {
         let identifier: UUID
