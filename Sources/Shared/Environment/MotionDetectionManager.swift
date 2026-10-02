@@ -126,13 +126,14 @@ public class MotionDetectionManager: NSObject {
 
     // MARK: - Capture plumbing
 
-    private let captureSession = AVCaptureSession()
+    private var captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "motion-detection-session")
     private let processingQueue = DispatchQueue(label: "motion-detection-frames")
     private var isCaptureSessionConfigured = false
     private var captureDevice: AVCaptureDevice?
     /// Retained so the capture connection can be re-oriented as the device rotates.
     private var videoOutput: AVCaptureVideoDataOutput?
+    private var captureSessionNotificationTokens: [NSObjectProtocol] = []
 
     /// Subsampling step over the Y plane; with VGA input this yields roughly
     /// 80x60 samples per frame, plenty for presence detection.
@@ -186,30 +187,56 @@ public class MotionDetectionManager: NSObject {
             name: UIApplication.protectedDataDidBecomeAvailableNotification,
             object: nil
         )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(captureSessionWasInterrupted),
-            name: AVCaptureSession.wasInterruptedNotification,
-            object: captureSession
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(captureSessionInterruptionEnded),
-            name: AVCaptureSession.interruptionEndedNotification,
-            object: captureSession
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(captureSessionRuntimeError),
-            name: AVCaptureSession.runtimeErrorNotification,
-            object: captureSession
-        )
+        registerCaptureSessionNotifications()
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(deviceOrientationDidChange),
             name: UIDevice.orientationDidChangeNotification,
             object: nil
         )
+    }
+
+    deinit {
+        unregisterCaptureSessionNotifications()
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    private func registerCaptureSessionNotifications() {
+        unregisterCaptureSessionNotifications()
+
+        let center = NotificationCenter.default
+        captureSessionNotificationTokens = [
+            center.addObserver(
+                forName: AVCaptureSession.wasInterruptedNotification,
+                object: captureSession,
+                queue: nil
+            ) { [weak self] notification in
+                self?.captureSessionWasInterrupted(notification)
+            },
+            center.addObserver(
+                forName: AVCaptureSession.interruptionEndedNotification,
+                object: captureSession,
+                queue: nil
+            ) { [weak self] notification in
+                self?.captureSessionInterruptionEnded(notification)
+            },
+            center.addObserver(
+                forName: AVCaptureSession.runtimeErrorNotification,
+                object: captureSession,
+                queue: nil
+            ) { [weak self] notification in
+                self?.captureSessionRuntimeError(notification)
+            },
+        ]
+    }
+
+    private func unregisterCaptureSessionNotifications() {
+        let center = NotificationCenter.default
+        for token in captureSessionNotificationTokens {
+            center.removeObserver(token)
+        }
+        captureSessionNotificationTokens.removeAll()
     }
 
     // MARK: - Observers
@@ -321,18 +348,65 @@ public class MotionDetectionManager: NSObject {
                 return
             }
 
-            if self.captureSession.isRunning {
-                self.captureSession.stopRunning()
-                Current.Log.info("Motion detection: watchdog stopped stalled capture session")
-            }
-
-            self.previousSamples = nil
-            self.captureSession.startRunning()
-            Current.Log.info(
-                "Motion detection: watchdog restarted capture session; running=\(self.captureSession.isRunning)"
-            )
+            self.hardResetCaptureSessionLocked(reason: "watchdog-zero-frames")
             self.scheduleCaptureWatchdogLocked(reason: "recovery")
         }
+    }
+
+    /// Rebuilds the entire AVCapture pipeline. A cold Single App Mode boot can leave
+    /// an AVCaptureSession in a state where `isRunning == true` but no sample buffers
+    /// are delivered. A stop/start cycle is insufficient in that condition, while a
+    /// full app relaunch fixes it. This method mirrors that relaunch by discarding the
+    /// old session/input/output graph and creating a fresh one.
+    ///
+    /// Must be called on `sessionQueue`.
+    private func hardResetCaptureSessionLocked(reason: String) {
+        Current.Log.error(
+            "Motion detection: hard reset capture session; reason=\(reason), "
+                + "running=\(captureSession.isRunning), configured=\(isCaptureSessionConfigured)"
+        )
+
+        captureWatchdogGeneration += 1
+
+        if captureSession.isRunning {
+            captureSession.stopRunning()
+        }
+
+        if let videoOutput {
+            videoOutput.setSampleBufferDelegate(nil, queue: nil)
+        }
+
+        unregisterCaptureSessionNotifications()
+
+        for input in captureSession.inputs {
+            captureSession.removeInput(input)
+        }
+        for output in captureSession.outputs {
+            captureSession.removeOutput(output)
+        }
+
+        videoOutput = nil
+        isCaptureSessionConfigured = false
+        previousSamples = nil
+        capturedFrameCount.mutate { $0 = 0 }
+
+        captureSession = AVCaptureSession()
+        registerCaptureSessionNotifications()
+
+        configureCaptureSession()
+
+        guard wantsRunning, isCaptureSessionConfigured else {
+            Current.Log.error(
+                "Motion detection: hard reset finished without restart; "
+                    + "wantsRunning=\(wantsRunning), configured=\(isCaptureSessionConfigured)"
+            )
+            return
+        }
+
+        captureSession.startRunning()
+        Current.Log.info(
+            "Motion detection: hard reset restarted capture session; running=\(captureSession.isRunning)"
+        )
     }
 
     private func reconcileCaptureSession(reason: String) {
