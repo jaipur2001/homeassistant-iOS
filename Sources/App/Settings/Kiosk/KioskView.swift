@@ -11,23 +11,29 @@ struct KioskView: View {
 
     var body: some View {
         ContainerView(appSettings: appSettings)
-            .background(KioskActivityDetector { screensaver.recordActivity() })
+            .background {
+                if kiosk.settings.enabled {
+                    KioskActivityDetector { screensaver.recordActivity() }
+                }
+            }
             .overlay(alignment: .bottomLeading) {
-                if Current.isDebug {
+                if kiosk.settings.enabled && Current.isDebug {
                     debugWatermark
                 }
             }
             .overlay {
-                ZStack(alignment: settingsEntryAlignment) {
-                    Color.clear
-                        .allowsHitTesting(false)
-                    settingsEntryButton
-                        .padding(DesignSystem.Spaces.two)
+                if kiosk.settings.enabled {
+                    ZStack(alignment: settingsEntryAlignment) {
+                        Color.clear
+                            .allowsHitTesting(false)
+                        settingsEntryButton
+                            .padding(DesignSystem.Spaces.two)
+                    }
+                    .ignoresSafeArea()
                 }
-                .ignoresSafeArea()
             }
             .overlay {
-                if screensaver.isActive {
+                if kiosk.settings.enabled && screensaver.isActive {
                     KioskScreensaverView(settings: screensaver.screensaver) {
                         screensaver.wake()
                     }
