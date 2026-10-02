@@ -85,6 +85,14 @@ public class MotionDetectionManager: NSObject {
         }
     }
 
+    /// Reconciles the capture session with the current observer state.
+    /// Safe to call repeatedly: if capture is already running this is a no-op,
+    /// otherwise it starts the existing session without tearing anything down.
+    public func ensureRunning() {
+        guard wantsRunning else { return }
+        startSession()
+    }
+
     /// Percentage (0-100) of sampled pixels that must change for a frame to count
     /// as motion. Lower = more sensitive.
     public var areaThresholdPercent: Double {
@@ -498,6 +506,7 @@ public class MotionDetectionManager {
 
     public func register(observer: MotionDetectionObserver) {}
     public func unregister(observer: MotionDetectionObserver) {}
+    public func ensureRunning() {}
     public func refreshVideoOrientation() {}
 }
 
