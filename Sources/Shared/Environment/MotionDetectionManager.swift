@@ -41,9 +41,9 @@ public class MotionDetectionManager: NSObject {
 
     public var canDetectMotion: Bool {
         // Avoid touching AVFoundation before the host app is actually in the foreground.
-        // In app extensions Current.isForegroundApp resolves false because no UIApplication
+        // In app extensions Current.isForegroundApp() resolves false because no UIApplication
         // wrapper is installed there.
-        guard Current.isForegroundApp else { return true }
+        guard Current.isForegroundApp() else { return true }
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) != nil
     }
 
@@ -277,13 +277,13 @@ public class MotionDetectionManager: NSObject {
         // Single App Mode can auto-launch the process before this manager exists, so
         // relying solely on didBecomeActive notifications is insufficient. Query the
         // actual host-app state through the shared, extension-safe wrapper instead.
-        guard Current.isForegroundApp else {
+        guard Current.isForegroundApp() else {
             Current.Log.info("Motion detection: camera start deferred; host app not foreground-active")
             return
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, self.wantsRunning, Current.isForegroundApp else { return }
+            guard let self, self.wantsRunning, Current.isForegroundApp() else { return }
 
             self.checkAuthorization { [weak self] authorized in
                 guard let self, authorized else {
@@ -292,7 +292,7 @@ public class MotionDetectionManager: NSObject {
                 }
 
                 self.sessionQueue.async {
-                    guard self.wantsRunning, Current.isForegroundApp else {
+                    guard self.wantsRunning, Current.isForegroundApp() else {
                         Current.Log.info(
                             "Motion detection: start skipped because capture is no longer requested/foreground"
                         )
@@ -470,7 +470,7 @@ public class MotionDetectionManager: NSObject {
 
     @objc private func protectedDataDidBecomeAvailable() {
         Current.Log.info("Motion detection: protected data became available")
-        if Current.isForegroundApp {
+        if Current.isForegroundApp() {
             startSession()
         }
     }
