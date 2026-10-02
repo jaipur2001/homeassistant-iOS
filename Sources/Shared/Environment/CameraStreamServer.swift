@@ -36,6 +36,10 @@ public class CameraStreamServer {
     private let encodingQueue = DispatchQueue(label: "camera-stream-encoding")
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    /// State below is owned by `queue`. It prevents an unbounded backlog when
+    /// JPEG encoding or a client socket is slower than the camera capture rate.
+    private var isEncodingFrame = false
+    private var sendingConnections: Set<ObjectIdentifier> = []
     private var active = false
     private var isObservingCamera = false
     private lazy var ciContext = CIContext(options: [.workingColorSpace: Self.sdrColorSpace])
@@ -203,6 +207,8 @@ public class CameraStreamServer {
             connection.cancel()
         }
         connections.removeAll()
+        sendingConnections.removeAll()
+        isEncodingFrame = false
     }
 
     // MARK: - Connections
@@ -295,7 +301,9 @@ public class CameraStreamServer {
     }
 
     private func remove(connection: NWConnection) {
-        guard connections.removeValue(forKey: ObjectIdentifier(connection)) != nil else { return }
+        let identifier = ObjectIdentifier(connection)
+        sendingConnections.remove(identifier)
+        guard connections.removeValue(forKey: identifier) != nil else { return }
         Current.Log.info("Camera stream: client disconnected (\(connections.count) left)")
         notifyStateChange()
     }
@@ -375,20 +383,34 @@ public class CameraStreamServer {
     // MARK: - Frames
 
     /// Called by `MotionDetectionManager` with every captured frame (on its
-    /// processing queue). Encodes to JPEG once and broadcasts to all clients.
+    /// processing queue). At most one frame is queued for JPEG encoding at a time.
+    /// If encoding is still busy, newer capture frames are dropped instead of
+    /// accumulating an ever-growing backlog.
     ///
-    /// The closure capture retains the `CVPixelBuffer` (CoreVideo objects are
-    /// ARC-managed in Swift), so the buffer stays valid for async encoding; the
-    /// output's `alwaysDiscardsLateVideoFrames` prevents pool starvation.
+    /// Each client may likewise have at most one outstanding socket send. Slow or
+    /// stalled clients therefore cannot queue an unlimited number of MJPEG frames.
     public func handle(frame: CVPixelBuffer) {
+        let shouldEncode = queue.sync { () -> Bool in
+            guard !connections.isEmpty, !isEncodingFrame else { return false }
+            isEncodingFrame = true
+            return true
+        }
+
+        guard shouldEncode else { return }
+
         encodingQueue.async { [weak self] in
-            guard let self, !queue.sync(execute: { self.connections.isEmpty }) else { return }
+            guard let self else { return }
 
             let image = CIImage(cvPixelBuffer: frame, options: [.colorSpace: Self.sdrColorSpace])
             guard let jpeg = ciContext.jpegRepresentation(
                 of: image,
                 colorSpace: Self.sdrColorSpace
-            ) else { return }
+            ) else {
+                queue.async {
+                    self.isEncodingFrame = false
+                }
+                return
+            }
 
             let part = [
                 "--\(Self.boundary)",
@@ -403,10 +425,32 @@ public class CameraStreamServer {
             payload.append(Data("\r\n".utf8))
 
             queue.async {
-                for connection in self.connections.values {
-                    connection.send(content: payload, completion: .idempotent)
-                }
+                self.isEncodingFrame = false
+                self.broadcast(payload: payload)
             }
+        }
+    }
+
+    /// Broadcasts one already-encoded MJPEG part without allowing socket writes to
+    /// pile up. A client that is still sending the previous frame simply skips this
+    /// one and receives the next available frame after its send completes.
+    private func broadcast(payload: Data) {
+        for (identifier, connection) in connections {
+            guard !sendingConnections.contains(identifier) else { continue }
+            sendingConnections.insert(identifier)
+
+            connection.send(content: payload, completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                queue.async {
+                    self.sendingConnections.remove(identifier)
+
+                    if let error {
+                        Current.Log.warning("Camera stream: send failed: \(error)")
+                        connection.cancel()
+                        self.remove(connection: connection)
+                    }
+                }
+            })
         }
     }
 }
