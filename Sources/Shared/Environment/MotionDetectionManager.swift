@@ -450,8 +450,10 @@ extension MotionDetectionManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // Feed the MJPEG stream server every frame (no-op when no client is connected).
+        // Feed both local camera transports from the same capture frame.
+        // Each transport drops work internally when it has no active consumer.
         Current.cameraStreamServer.handle(frame: pixelBuffer)
+        Current.cameraRTSPServer.handle(frame: pixelBuffer)
 
         // Detection samples frames at its own rate; the capture session may run
         // faster when the stream server needs a higher frame rate. The 0.9 factor
