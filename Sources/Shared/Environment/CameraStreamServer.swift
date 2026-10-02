@@ -179,6 +179,10 @@ public class CameraStreamServer {
                 updateCameraObservation()
             }
 
+            // Keep the H.264/RTSP transport coupled to the same enabled Camera Stream
+            // sensor while the new path is evaluated. MJPEG remains available in parallel.
+            Current.cameraRTSPServer.setActive(newValue)
+
             if changed {
                 notifyStateChange()
             }
@@ -1247,7 +1251,7 @@ public final class CameraRTSPServer {
 
         let fuIndicator = (nalHeader & 0xE0) | 28
         let nalType = nalHeader & 0x1F
-        let payloadBytes = nalUnit.dropFirst()
+        let payloadBytes = Data(nalUnit.dropFirst())
         let chunkSize = Self.maxRTPPayload - 2
 
         var offset = 0
