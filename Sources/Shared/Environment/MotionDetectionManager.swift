@@ -147,6 +147,17 @@ public class MotionDetectionManager: NSObject {
     private var observers = NSHashTable<AnyObject>(options: .weakMemory)
     private var wantsRunning = false
 
+    /// Number of frames delivered by AVCaptureVideoDataOutput. The watchdog compares
+    /// this value before/after a short grace period so a session that reports
+    /// `isRunning == true` but produces no frames can be recovered after cold boot.
+    private let capturedFrameCount = HAProtected<Int>(value: 0)
+
+    /// Session-queue-owned recovery state. Incrementing the generation invalidates
+    /// already scheduled watchdog checks without needing to cancel DispatchWorkItems.
+    private var captureWatchdogGeneration = 0
+    private var captureRecoveryAttempt = 0
+    private static let maxCaptureRecoveryAttempts = 6
+
     override public init() {
         super.init()
         self.captureDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
@@ -168,6 +179,18 @@ public class MotionDetectionManager: NSObject {
             selector: #selector(applicationDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification,
             object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(protectedDataDidBecomeAvailable),
+            name: UIApplication.protectedDataDidBecomeAvailableNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(captureSessionWasInterrupted),
+            name: AVCaptureSession.wasInterruptedNotification,
+            object: captureSession
         )
         NotificationCenter.default.addObserver(
             self,
@@ -254,7 +277,61 @@ public class MotionDetectionManager: NSObject {
                         "Motion detection: capture session start requested; running=\(self.captureSession.isRunning)"
                     )
                 }
+
+                // A cold-launch session can occasionally report running before video
+                // delivery actually begins. Verify that frames arrive and recover if not.
+                self.scheduleCaptureWatchdogLocked(reason: "startSession")
             }
+        }
+    }
+
+    /// Must be called on `sessionQueue`.
+    private func scheduleCaptureWatchdogLocked(reason: String) {
+        captureWatchdogGeneration += 1
+        let generation = captureWatchdogGeneration
+        let frameCountBefore = capturedFrameCount.read { $0 }
+
+        Current.Log.info(
+            "Motion detection: watchdog scheduled (\(reason)); generation=\(generation), "
+                + "frames=\(frameCountBefore), running=\(captureSession.isRunning)"
+        )
+
+        sessionQueue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self,
+                  generation == self.captureWatchdogGeneration,
+                  self.wantsRunning else { return }
+
+            let frameCountAfter = self.capturedFrameCount.read { $0 }
+            if frameCountAfter > frameCountBefore {
+                self.captureRecoveryAttempt = 0
+                Current.Log.info(
+                    "Motion detection: watchdog healthy; received \(frameCountAfter - frameCountBefore) frames"
+                )
+                return
+            }
+
+            self.captureRecoveryAttempt += 1
+            Current.Log.error(
+                "Motion detection: watchdog detected zero frames; running=\(self.captureSession.isRunning), "
+                    + "recoveryAttempt=\(self.captureRecoveryAttempt)"
+            )
+
+            guard self.captureRecoveryAttempt <= Self.maxCaptureRecoveryAttempts else {
+                Current.Log.error("Motion detection: watchdog recovery limit reached")
+                return
+            }
+
+            if self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+                Current.Log.info("Motion detection: watchdog stopped stalled capture session")
+            }
+
+            self.previousSamples = nil
+            self.captureSession.startRunning()
+            Current.Log.info(
+                "Motion detection: watchdog restarted capture session; running=\(self.captureSession.isRunning)"
+            )
+            self.scheduleCaptureWatchdogLocked(reason: "recovery")
         }
     }
 
@@ -273,7 +350,10 @@ public class MotionDetectionManager: NSObject {
 
     private func stopSession() {
         sessionQueue.async { [weak self] in
-            guard let self, captureSession.isRunning else { return }
+            guard let self else { return }
+            captureWatchdogGeneration += 1
+            captureRecoveryAttempt = 0
+            guard captureSession.isRunning else { return }
             captureSession.stopRunning()
             previousSamples = nil
             Current.Log.info("Motion detection: capture session stopped")
@@ -302,6 +382,22 @@ public class MotionDetectionManager: NSObject {
         if wantsRunning {
             refreshVideoOrientation()
         }
+    }
+
+    @objc private func protectedDataDidBecomeAvailable() {
+        Current.Log.info("Motion detection: protected data became available")
+        reconcileCaptureSession(reason: "protectedDataAvailable")
+    }
+
+    @objc private func captureSessionWasInterrupted(_ notification: Notification) {
+        let reason: String
+        if let rawReason = notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber,
+           let interruptionReason = AVCaptureSession.InterruptionReason(rawValue: rawReason.intValue) {
+            reason = String(describing: interruptionReason)
+        } else {
+            reason = "unknown"
+        }
+        Current.Log.error("Motion detection: capture session interrupted; reason=\(reason)")
     }
 
     @objc private func captureSessionInterruptionEnded(_ notification: Notification) {
@@ -514,6 +610,8 @@ extension MotionDetectionManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         from connection: AVCaptureConnection
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        capturedFrameCount.mutate { $0 += 1 }
 
         // Feed both local camera transports from the same capture frame.
         // Each transport drops work internally when it has no active consumer.
