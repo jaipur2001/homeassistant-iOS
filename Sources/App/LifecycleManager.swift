@@ -148,6 +148,22 @@ class LifecycleManager {
     }
 
     @objc private func didBecomeActive() {
+        // Camera streaming must not depend solely on CameraStreamSensor being
+        // instantiated by a sensor update. On a Single App Mode cold boot there may
+        // be no immediate sensor refresh, leaving the listener/capture pipeline idle
+        // until an unrelated setting change (such as toggling kiosk mode) happens.
+        //
+        // LifecycleManager exists from AppDelegate construction and therefore sees
+        // the real didBecomeActive transition reliably. Reconcile the persisted
+        // Camera Stream enablement here so MJPEG and RTSP start deterministically.
+        let cameraStreamEnabled = Current.sensors.isEnabled(
+            uniqueID: WebhookSensorId.cameraStream.rawValue
+        )
+        Current.Log.info(
+            "Lifecycle: reconciling camera stream on didBecomeActive; enabled=\(cameraStreamEnabled)"
+        )
+        Current.cameraStreamServer.setActive(cameraStreamEnabled)
+
         Current.backgroundTask(withName: BackgroundTask.lifecycleManagerDidBecomeActive.rawValue) { _ in
             when(fulfilled: Current.apis.map { api in
                 api.CreateEvent(
