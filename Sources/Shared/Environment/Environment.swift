@@ -472,6 +472,8 @@ public class AppEnvironment {
 
     public lazy var cameraStreamServer: CameraStreamServer = .init()
 
+    public lazy var cameraRTSPServer: CameraRTSPServer = .init()
+
     public lazy var clientVersion: () -> Version = { AppConstants.clientVersion }
 
     public var onboardingObservation = OnboardingStateObservation()
