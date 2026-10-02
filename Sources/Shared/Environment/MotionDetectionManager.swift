@@ -254,10 +254,27 @@ public class MotionDetectionManager: NSObject {
 
     public func unregister(observer: MotionDetectionObserver) {
         observers.remove(observer)
-        if observers.allObjects.isEmpty {
-            wantsRunning = false
-            setGeneratingOrientationNotifications(false)
-            stopSession()
+
+        let remainingObserverCount = observers.allObjects.count
+        let cameraStreamActive = Current.cameraStreamServer.isActive
+
+        if remainingObserverCount == 0 {
+            if cameraStreamActive {
+                // The local camera stream owns the capture session independently of
+                // kiosk motion observation. Toggling kiosk mode may unregister its
+                // MotionDetectionObserver; that must never stop AVCapture while
+                // MJPEG/RTSP are enabled.
+                wantsRunning = true
+                Current.Log.info(
+                    "Motion detection: last observer removed, but camera stream is active; "
+                        + "keeping capture session running"
+                )
+                startSession()
+            } else {
+                wantsRunning = false
+                setGeneratingOrientationNotifications(false)
+                stopSession()
+            }
         }
     }
 
