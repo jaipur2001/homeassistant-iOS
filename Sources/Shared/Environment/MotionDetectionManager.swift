@@ -40,9 +40,10 @@ public class MotionDetectionManager: NSObject {
     }
 
     public var canDetectMotion: Bool {
-        // Before the app has reached didBecomeActive, avoid touching AVFoundation at all.
-        // The real availability check happens during capture-session configuration.
-        guard appHasBecomeActive else { return true }
+        // Avoid touching AVFoundation before the host app is actually in the foreground.
+        // In app extensions Current.isForegroundApp resolves false because no UIApplication
+        // wrapper is installed there.
+        guard Current.isForegroundApp else { return true }
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) != nil
     }
 
@@ -150,7 +151,6 @@ public class MotionDetectionManager: NSObject {
     private var clearTimer: Timer?
     private var observers = NSHashTable<AnyObject>(options: .weakMemory)
     private var wantsRunning = false
-    private var appHasBecomeActive = false
 
     /// Number of frames delivered by AVCaptureVideoDataOutput. The watchdog compares
     /// this value before/after a short grace period so a session that reports
@@ -274,17 +274,16 @@ public class MotionDetectionManager: NSObject {
     // MARK: - Session lifecycle
 
     private func startSession() {
-        // In Single App Mode iPadOS can auto-launch the process very early during boot.
-        // Do not touch AVFoundation until the app has actually received didBecomeActive.
-        guard appHasBecomeActive else {
-            Current.Log.info("Motion detection: camera start deferred; app has not become active yet")
+        // Single App Mode can auto-launch the process before this manager exists, so
+        // relying solely on didBecomeActive notifications is insufficient. Query the
+        // actual host-app state through the shared, extension-safe wrapper instead.
+        guard Current.isForegroundApp else {
+            Current.Log.info("Motion detection: camera start deferred; host app not foreground-active")
             return
         }
 
-        // Give SpringBoard / Single App Mode a short stabilization window after
-        // didBecomeActive before constructing the capture graph.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, self.wantsRunning, self.appHasBecomeActive else { return }
+            guard let self, self.wantsRunning, Current.isForegroundApp else { return }
 
             self.checkAuthorization { [weak self] authorized in
                 guard let self, authorized else {
@@ -293,9 +292,9 @@ public class MotionDetectionManager: NSObject {
                 }
 
                 self.sessionQueue.async {
-                    guard self.wantsRunning, self.appHasBecomeActive else {
+                    guard self.wantsRunning, Current.isForegroundApp else {
                         Current.Log.info(
-                            "Motion detection: start skipped because capture is no longer requested/active"
+                            "Motion detection: start skipped because capture is no longer requested/foreground"
                         )
                         return
                     }
@@ -451,7 +450,6 @@ public class MotionDetectionManager: NSObject {
     }
 
     @objc private func applicationDidEnterBackground() {
-        appHasBecomeActive = false
         // iOS forbids camera capture in the background; stop cleanly.
         stopSession()
     }
@@ -461,7 +459,6 @@ public class MotionDetectionManager: NSObject {
     }
 
     @objc private func applicationDidBecomeActive() {
-        appHasBecomeActive = true
         reconcileCaptureSession(reason: "didBecomeActive")
 
         // Orientation notifications are suspended in the background, so the device
@@ -473,7 +470,7 @@ public class MotionDetectionManager: NSObject {
 
     @objc private func protectedDataDidBecomeAvailable() {
         Current.Log.info("Motion detection: protected data became available")
-        if appHasBecomeActive {
+        if Current.isForegroundApp {
             startSession()
         }
     }
