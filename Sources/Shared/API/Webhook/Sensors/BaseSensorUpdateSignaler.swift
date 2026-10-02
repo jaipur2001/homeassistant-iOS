@@ -40,7 +40,21 @@ class BaseSensorUpdateSignaler: SensorObserver {
         didSignalForUpdateBecause reason: SensorContainerUpdateReason,
         lastUpdate: SensorObserverUpdate?
     ) {
-        guard case .settingsChange = reason else { return }
+        guard case let .settingsChange(changedUniqueIDs) = reason else { return }
+
+        // A settings change for one sensor must not tear down observers belonging to
+        // unrelated sensors. Kiosk mode, for example, toggles its brightness/volume/
+        // screensaver sensors as a group; without this filter that global signal also
+        // made CameraStreamSensorUpdateSignaler re-evaluate itself and could stop the
+        // camera stream even though the Camera Stream sensor had not changed.
+        //
+        // An empty list is the explicit "global enablement changed" signal used by
+        // reset/migration paths, so that case still re-evaluates every signaler.
+        if !changedUniqueIDs.isEmpty {
+            let relatedUniqueIDs = Set(relatedSensorsIds.map(\.rawValue))
+            guard changedUniqueIDs.contains(where: relatedUniqueIDs.contains) else { return }
+        }
+
         updateObservation(sensorUpdates: lastUpdate)
     }
 
