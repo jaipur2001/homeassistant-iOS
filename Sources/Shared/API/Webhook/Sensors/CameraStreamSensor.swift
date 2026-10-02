@@ -62,10 +62,14 @@ final class CameraStreamSensor: SensorProvider {
             icon: isStreaming ? "mdi:cctv" : "mdi:cctv-off",
             state: isStreaming ? "streaming" : "idle"
         )
+        let rtspServer = Current.cameraRTSPServer
         sensor.Attributes = [
             "Port": server.port,
             "Clients": server.clientCount,
             "Stream URL": server.streamURL ?? "unavailable (no Wi-Fi address)",
+            "RTSP Port": rtspServer.port,
+            "RTSP Clients": rtspServer.clientCount,
+            "RTSP URL": rtspServer.streamURL ?? "unavailable (no Wi-Fi address)",
         ]
         sensor.detailFooter = L10n.Sensors.CameraStream.detailFooter
 
