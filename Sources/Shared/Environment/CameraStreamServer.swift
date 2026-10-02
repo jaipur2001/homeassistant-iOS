@@ -161,15 +161,27 @@ public class CameraStreamServer {
     /// the camera runs continuously (foreground only).
     public func setActive(_ newValue: Bool) {
         queue.async { [weak self] in
-            guard let self, active != newValue else { return }
+            guard let self else { return }
+
+            let changed = active != newValue
             active = newValue
+
             if newValue {
+                // Reconcile every time instead of treating repeated activation as
+                // a no-op. Sensor refreshes can therefore restore a missing listener
+                // or capture session without stopping a healthy stream first.
                 startListener()
+                ensureCameraObservation()
+                Current.motionDetection.ensureRunning()
             } else {
                 stopListener()
+                updateCameraObservation()
             }
-            updateCameraObservation()
-            notifyStateChange()
+
+            if changed {
+                notifyStateChange()
+            }
+
             // The capture rate depends on which consumers are active.
             Current.motionDetection.refreshFrameRate()
         }
@@ -377,6 +389,18 @@ public class CameraStreamServer {
             } else {
                 Current.motionDetection.unregister(observer: self)
             }
+        }
+    }
+
+    /// Ensures this server still owns a capture observation. Registering the same
+    /// weak observer repeatedly is harmless, and repairs the relationship if the
+    /// sensor lifecycle was rebuilt while `active` stayed true.
+    private func ensureCameraObservation() {
+        isObservingCamera = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            Current.motionDetection.register(observer: self)
+            Current.motionDetection.ensureRunning()
         }
     }
 
