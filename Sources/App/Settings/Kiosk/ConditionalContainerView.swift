@@ -100,13 +100,11 @@ struct ConditionalContainerView: View {
     }
 
     private var content: some View {
-        Group {
-            if kiosk.settings.enabled {
-                KioskView(appSettings: appSettings, showSettings: $showKioskSettings)
-            } else {
-                ContainerView(appSettings: appSettings)
-            }
-        }
+        KioskView(appSettings: appSettings, showSettings: $showKioskSettings)
+        // Keep the same ContainerView/WebView hierarchy mounted when kiosk mode is
+        // toggled. Replacing the root subtree tears down and recreates long-lived app
+        // UI state and can disturb services/observers such as the local camera stream.
+        // KioskView itself decides which kiosk overlays are visible.
         // The zoom transition into the server picker starts from the frontend's stand-by view, which is
         // several levels down from the sheet that plays it.
         .environment(\.serverSelectionNamespace, serverSelectionNamespace)
