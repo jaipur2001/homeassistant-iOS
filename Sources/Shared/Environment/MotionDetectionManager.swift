@@ -89,8 +89,7 @@ public class MotionDetectionManager: NSObject {
     /// Safe to call repeatedly: if capture is already running this is a no-op,
     /// otherwise it starts the existing session without tearing anything down.
     public func ensureRunning() {
-        guard wantsRunning else { return }
-        startSession()
+        reconcileCaptureSession(reason: "ensureRunning")
     }
 
     /// Percentage (0-100) of sampled pixels that must change for a frame to count
@@ -160,9 +159,27 @@ public class MotionDetectionManager: NSObject {
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(applicationWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(applicationDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification,
             object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(captureSessionInterruptionEnded),
+            name: AVCaptureSession.interruptionEndedNotification,
+            object: captureSession
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(captureSessionRuntimeError),
+            name: AVCaptureSession.runtimeErrorNotification,
+            object: captureSession
         )
         NotificationCenter.default.addObserver(
             self,
@@ -207,7 +224,10 @@ public class MotionDetectionManager: NSObject {
     // MARK: - Session lifecycle
 
     private func startSession() {
-        guard canDetectMotion else { return }
+        guard canDetectMotion else {
+            Current.Log.error("Motion detection: no front camera available")
+            return
+        }
 
         checkAuthorization { [weak self] authorized in
             guard let self, authorized else {
@@ -215,17 +235,40 @@ public class MotionDetectionManager: NSObject {
                 return
             }
             sessionQueue.async {
-                guard self.wantsRunning else { return }
+                guard self.wantsRunning else {
+                    Current.Log.info("Motion detection: start skipped because no consumer wants capture")
+                    return
+                }
                 if !self.isCaptureSessionConfigured {
                     self.configureCaptureSession()
                 }
-                if self.isCaptureSessionConfigured, !self.captureSession.isRunning {
+                guard self.isCaptureSessionConfigured else {
+                    Current.Log.error("Motion detection: capture session is not configured")
+                    return
+                }
+
+                if !self.captureSession.isRunning {
                     self.previousSamples = nil
                     self.captureSession.startRunning()
-                    Current.Log.info("Motion detection: capture session started")
+                    Current.Log.info(
+                        "Motion detection: capture session start requested; running=\(self.captureSession.isRunning)"
+                    )
                 }
             }
         }
+    }
+
+    private func reconcileCaptureSession(reason: String) {
+        guard wantsRunning else {
+            Current.Log.info("Motion detection: reconcile \(reason) skipped; wantsRunning=false")
+            return
+        }
+
+        Current.Log.info(
+            "Motion detection: reconcile \(reason); configured=\(isCaptureSessionConfigured), "
+                + "running=\(captureSession.isRunning)"
+        )
+        startSession()
     }
 
     private func stopSession() {
@@ -247,13 +290,35 @@ public class MotionDetectionManager: NSObject {
         stopSession()
     }
 
+    @objc private func applicationWillEnterForeground() {
+        reconcileCaptureSession(reason: "willEnterForeground")
+    }
+
     @objc private func applicationDidBecomeActive() {
+        reconcileCaptureSession(reason: "didBecomeActive")
+
+        // Orientation notifications are suspended in the background, so the device
+        // may have been rotated since the session last ran.
         if wantsRunning {
-            startSession()
-            // Orientation notifications are suspended in the background, so the device
-            // may have been rotated since the session last ran.
             refreshVideoOrientation()
         }
+    }
+
+    @objc private func captureSessionInterruptionEnded(_ notification: Notification) {
+        Current.Log.info("Motion detection: capture session interruption ended")
+        reconcileCaptureSession(reason: "interruptionEnded")
+    }
+
+    @objc private func captureSessionRuntimeError(_ notification: Notification) {
+        if let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError {
+            Current.Log.error(
+                "Motion detection: capture session runtime error \(error.domain) \(error.code): "
+                    + "\(error.localizedDescription)"
+            )
+        } else {
+            Current.Log.error("Motion detection: capture session runtime error")
+        }
+        reconcileCaptureSession(reason: "runtimeError")
     }
 
     // MARK: - Orientation
