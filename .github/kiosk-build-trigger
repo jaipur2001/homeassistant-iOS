@@ -1,1 +1,1 @@
-trigger: build-31-hard-reset-camera-pipeline
+trigger: build-32-defer-avfoundation-cold-boot
