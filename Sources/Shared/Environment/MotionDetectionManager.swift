@@ -40,7 +40,10 @@ public class MotionDetectionManager: NSObject {
     }
 
     public var canDetectMotion: Bool {
-        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) != nil
+        // Before the app has reached didBecomeActive, avoid touching AVFoundation at all.
+        // The real availability check happens during capture-session configuration.
+        guard appHasBecomeActive else { return true }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) != nil
     }
 
     public var attributes: [String: Any] {
@@ -147,6 +150,7 @@ public class MotionDetectionManager: NSObject {
     private var clearTimer: Timer?
     private var observers = NSHashTable<AnyObject>(options: .weakMemory)
     private var wantsRunning = false
+    private var appHasBecomeActive = false
 
     /// Number of frames delivered by AVCaptureVideoDataOutput. The watchdog compares
     /// this value before/after a short grace period so a session that reports
@@ -270,76 +274,50 @@ public class MotionDetectionManager: NSObject {
     // MARK: - Session lifecycle
 
     private func startSession() {
-        guard canDetectMotion else {
-            Current.Log.error("Motion detection: no front camera available")
+        // In Single App Mode iPadOS can auto-launch the process very early during boot.
+        // Do not touch AVFoundation until the app has actually received didBecomeActive.
+        guard appHasBecomeActive else {
+            Current.Log.info("Motion detection: camera start deferred; app has not become active yet")
             return
         }
 
-        // Single App Mode may auto-launch us extremely early during boot. Do not even
-        // construct an AVCaptureSession/AVCaptureDeviceInput until iOS reports both
-        // protected data availability and an active foreground application. Starting
-        // AVFoundation earlier can leave the process with a non-delivering capture
-        // graph for the remainder of that process lifetime.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+        // Give SpringBoard / Single App Mode a short stabilization window after
+        // didBecomeActive before constructing the capture graph.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.wantsRunning, self.appHasBecomeActive else { return }
 
-            guard UIApplication.shared.isProtectedDataAvailable else {
-                Current.Log.info("Motion detection: camera start deferred; protected data unavailable")
-                return
-            }
-
-            guard UIApplication.shared.applicationState == .active else {
-                Current.Log.info(
-                    "Motion detection: camera start deferred; applicationState="
-                        + "\(UIApplication.shared.applicationState.rawValue)"
-                )
-                return
-            }
-
-            // Give SpringBoard / Single App Mode a short stabilization window after
-            // cold boot before touching AVFoundation. Re-check the conditions after
-            // the delay so a transient active state cannot start capture incorrectly.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self, self.wantsRunning else { return }
-                guard UIApplication.shared.isProtectedDataAvailable,
-                      UIApplication.shared.applicationState == .active else {
-                    Current.Log.info("Motion detection: delayed camera start cancelled; app not ready")
+            self.checkAuthorization { [weak self] authorized in
+                guard let self, authorized else {
+                    Current.Log.error("Motion detection: camera access not authorized")
                     return
                 }
 
-                self.checkAuthorization { [weak self] authorized in
-                    guard let self, authorized else {
-                        Current.Log.error("Motion detection: camera access not authorized")
+                self.sessionQueue.async {
+                    guard self.wantsRunning, self.appHasBecomeActive else {
+                        Current.Log.info(
+                            "Motion detection: start skipped because capture is no longer requested/active"
+                        )
                         return
                     }
 
-                    self.sessionQueue.async {
-                        guard self.wantsRunning else {
-                            Current.Log.info(
-                                "Motion detection: start skipped because no consumer wants capture"
-                            )
-                            return
-                        }
-
-                        if !self.isCaptureSessionConfigured {
-                            self.configureCaptureSession()
-                        }
-                        guard self.isCaptureSessionConfigured else {
-                            Current.Log.error("Motion detection: capture session is not configured")
-                            return
-                        }
-
-                        if !self.captureSession.isRunning {
-                            self.previousSamples = nil
-                            self.captureSession.startRunning()
-                            Current.Log.info(
-                                "Motion detection: capture session start requested; running="
-                                    + "\(self.captureSession.isRunning)"
-                            )
-                        }
-
-                        self.scheduleCaptureWatchdogLocked(reason: "startSession")
+                    if !self.isCaptureSessionConfigured {
+                        self.configureCaptureSession()
                     }
+                    guard self.isCaptureSessionConfigured else {
+                        Current.Log.error("Motion detection: capture session is not configured")
+                        return
+                    }
+
+                    if !self.captureSession.isRunning {
+                        self.previousSamples = nil
+                        self.captureSession.startRunning()
+                        Current.Log.info(
+                            "Motion detection: capture session start requested; running="
+                                + "\(self.captureSession.isRunning)"
+                        )
+                    }
+
+                    self.scheduleCaptureWatchdogLocked(reason: "startSession")
                 }
             }
         }
@@ -473,15 +451,17 @@ public class MotionDetectionManager: NSObject {
     }
 
     @objc private func applicationDidEnterBackground() {
+        appHasBecomeActive = false
         // iOS forbids camera capture in the background; stop cleanly.
         stopSession()
     }
 
     @objc private func applicationWillEnterForeground() {
-        reconcileCaptureSession(reason: "willEnterForeground")
+        Current.Log.info("Motion detection: will enter foreground; waiting for didBecomeActive")
     }
 
     @objc private func applicationDidBecomeActive() {
+        appHasBecomeActive = true
         reconcileCaptureSession(reason: "didBecomeActive")
 
         // Orientation notifications are suspended in the background, so the device
@@ -493,7 +473,9 @@ public class MotionDetectionManager: NSObject {
 
     @objc private func protectedDataDidBecomeAvailable() {
         Current.Log.info("Motion detection: protected data became available")
-        startSession()
+        if appHasBecomeActive {
+            startSession()
+        }
     }
 
     @objc private func captureSessionWasInterrupted(_ notification: Notification) {
