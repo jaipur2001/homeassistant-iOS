@@ -248,8 +248,26 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
         do {
             let audioSession = AVAudioSession.sharedInstance()
+
+            // The camera stream can stay active for the whole kiosk session. Reset
+            // the shared audio session explicitly before native MP3 playback so no
+            // stale category/mode from another AVFoundation user leaves playback
+            // silent even though AVAudioPlayer itself starts successfully.
+            do {
+                try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            } catch {
+                Current.Log.warning(
+                    "Native kiosk audio: unable to deactivate previous audio session: \(error)"
+                )
+            }
+
             try audioSession.setCategory(.playback, mode: .default, options: [])
             try audioSession.setActive(true)
+
+            Current.Log.info(
+                "Native kiosk audio session active: category=\(audioSession.category.rawValue), "
+                    + "mode=\(audioSession.mode.rawValue), volume=\(audioSession.outputVolume)"
+            )
 
             let player = try AVAudioPlayer(contentsOf: fileURL)
             player.volume = 1.0
