@@ -166,11 +166,90 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                         on: webViewController
                     )
                 } catch {
-                    Current.Log.error("Failed to resolve dynamic doorbell station: \(error)")
+                    Current.Log.warning(
+                        "Doorbell station not available in local registry, forcing refresh before retry: \(error)"
+                    )
+                    self.refreshDoorbellRegistryAndRetry(
+                        userInfo: userInfo,
+                        server: server,
+                        webViewController: webViewController,
+                        initialError: error
+                    )
                 }
             }.catch { error in
                 Current.Log.error("Failed to show dynamic doorbell overlay: \(error)")
             }
+    }
+
+    private func refreshDoorbellRegistryAndRetry(
+        userInfo: [AnyHashable: Any],
+        server: Server,
+        webViewController: WebViewControllerProtocol,
+        initialError: Error
+    ) {
+        var observer: NSObjectProtocol?
+        var didFinish = false
+
+        func finishRetry() {
+            guard !didFinish else { return }
+            didFinish = true
+
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+
+            DispatchQueue.main.async { [weak self, weak webViewController] in
+                guard let self, let webViewController else { return }
+
+                do {
+                    let station = try KioskDoorbellStationResolver.resolve(
+                        server: server,
+                        userInfo: userInfo
+                    )
+                    Current.Log.info(
+                        "Doorbell station resolved after forced registry refresh: \(station.id)"
+                    )
+                    KioskDoorbellOverlayPresenter.shared.show(
+                        station: station,
+                        server: server,
+                        on: webViewController
+                    )
+                } catch {
+                    Current.Log.error(
+                        "Doorbell station resolution failed after forced registry refresh. "
+                            + "Initial error: \(initialError). Retry error: \(error)"
+                    )
+                    KioskDoorbellOverlayPresenter.shared.showConfigurationError(
+                        message: error.localizedDescription,
+                        on: webViewController
+                    )
+                }
+            }
+        }
+
+        observer = NotificationCenter.default.addObserver(
+            forName: .appDatabaseUpdaterDidFinishRoutine,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard let updatedServer = notification.object as? Server,
+                  updatedServer.identifier == server.identifier else {
+                return
+            }
+            finishRetry()
+        }
+
+        Current.appDatabaseUpdater.update(
+            server: server,
+            forceUpdate: true,
+            showProgress: false
+        )
+
+        // A failed/cancelled refresh may never emit the completion notification.
+        // Retry once from the current cache anyway, but never leave the doorbell command silent.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+            finishRetry()
+        }
     }
 
     private func hideDoorbell() {
@@ -1213,6 +1292,34 @@ private final class KioskDoorbellOverlayPresenter {
         present()
     }
 
+    func showConfigurationError(
+        message: String,
+        on webViewController: WebViewControllerProtocol
+    ) {
+        precondition(Thread.isMainThread)
+
+        let controller = KioskDoorbellConfigurationErrorView(
+            message: message,
+            dismiss: { [weak self, weak webViewController] in
+                guard let self, let webViewController else { return }
+                self.hide(on: webViewController)
+            }
+        )
+        .embeddedInHostingController()
+
+        controller.modalPresentationStyle = .overFullScreen
+        overlayController = controller
+        Current.kiosk.setCameraOverlayVisible(true)
+
+        if webViewController.overlayedController != nil {
+            webViewController.dismissOverlayController(animated: false) { [weak webViewController] in
+                webViewController?.presentOverlayController(controller: controller, animated: true)
+            }
+        } else {
+            webViewController.presentOverlayController(controller: controller, animated: true)
+        }
+    }
+
     func hide(on webViewController: WebViewControllerProtocol) {
         precondition(Thread.isMainThread)
 
@@ -1279,6 +1386,50 @@ private final class KioskDoorbellOverlayPresenter {
         }.catch { error in
             Current.Log.error("Doorbell opener \(opener.entityId) failed: \(error)")
         }
+    }
+}
+
+private struct KioskDoorbellConfigurationErrorView: View {
+    let message: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.94)
+                .ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                Image(systemName: "bell.slash.fill")
+                    .font(.system(size: 72, weight: .bold))
+                    .foregroundStyle(.orange)
+
+                Text("Doorbell nicht konfiguriert")
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Text(message)
+                    .font(.system(size: 20, weight: .medium, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(maxWidth: 700)
+
+                Text("Prüfe station_* und function_camera in Home Assistant.")
+                    .font(.system(size: 18, weight: .regular, design: .rounded))
+                    .foregroundStyle(.secondary)
+
+                Button(action: dismiss) {
+                    Label("Schließen", systemImage: "xmark.circle.fill")
+                        .font(.system(size: 22, weight: .bold))
+                        .frame(maxWidth: 320)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+            .padding(48)
+        }
+        .preferredColorScheme(.dark)
+        .interactiveDismissDisabled(true)
     }
 }
 
