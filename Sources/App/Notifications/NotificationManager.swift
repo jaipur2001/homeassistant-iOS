@@ -982,27 +982,71 @@ private struct KioskDoorbellPayload {
     let triggerEntityId: String?
 
     init(userInfo: [AnyHashable: Any]) {
-        stationId = Self.string("station", in: userInfo)
-            ?? Self.string("station_id", in: userInfo)
-        triggerEntityId = Self.string("trigger_entity_id", in: userInfo)
-            ?? Self.string("doorbell_entity_id", in: userInfo)
+        stationId = Self.string(
+            keys: ["station", "station_id"],
+            in: userInfo
+        )
+        triggerEntityId = Self.string(
+            keys: ["trigger_entity_id", "doorbell_entity_id"],
+            in: userInfo
+        )
     }
 
-    private static func string(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
-        if let value = userInfo[key] as? String,
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
+    /// Home Assistant mobile notifications may place custom payload values at the root,
+    /// under `homeassistant`, under `data`, or in `homeassistant.data` depending on
+    /// the delivery path. Doorbell routing must not depend on one particular nesting.
+    private static func string(
+        keys: Set<String>,
+        in dictionary: [AnyHashable: Any],
+        depth: Int = 0
+    ) -> String? {
+        guard depth <= 4 else { return nil }
+
+        for key in keys {
+            if let value = dictionary[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
         }
-        if let homeassistant = userInfo["homeassistant"] as? [String: Any],
-           let value = homeassistant[key] as? String,
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
+
+        // Search the notification containers we expect first so unrelated APNS
+        // dictionaries do not accidentally win over the Home Assistant payload.
+        for containerKey in ["homeassistant", "data"] {
+            if let nested = dictionary[containerKey] as? [AnyHashable: Any],
+               let value = string(keys: keys, in: nested, depth: depth + 1) {
+                return value
+            }
+
+            if let nested = dictionary[containerKey] as? [String: Any] {
+                let converted = Dictionary<AnyHashable, Any>(
+                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
+                )
+                if let value = string(keys: keys, in: converted, depth: depth + 1) {
+                    return value
+                }
+            }
         }
-        if let homeassistant = userInfo["homeassistant"] as? [AnyHashable: Any],
-           let value = homeassistant[key] as? String,
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
+
+        // Final bounded fallback for delivery variants that wrap custom data in
+        // one additional dictionary whose key is not under our control.
+        for value in dictionary.values {
+            if let nested = value as? [AnyHashable: Any],
+               let result = string(keys: keys, in: nested, depth: depth + 1) {
+                return result
+            }
+
+            if let nested = value as? [String: Any] {
+                let converted = Dictionary<AnyHashable, Any>(
+                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
+                )
+                if let result = string(keys: keys, in: converted, depth: depth + 1) {
+                    return result
+                }
+            }
         }
+
         return nil
     }
 }
