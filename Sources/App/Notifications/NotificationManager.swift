@@ -193,7 +193,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                             "Doorbell station resolution failed. Live: \(liveError). Cache: \(error)"
                         )
                         KioskDoorbellOverlayPresenter.shared.showConfigurationError(
-                            message: error.localizedDescription,
+                            message: "LIVE: \(liveError.localizedDescription)\n\nCACHE: \(error.localizedDescription)",
                             on: webViewController
                         )
                     }
@@ -931,6 +931,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
 private struct KioskDoorbellPayload {
     let stationId: String?
     let triggerEntityId: String?
+    let diagnosticSummary: String
 
     init(userInfo: [AnyHashable: Any]) {
         stationId = Self.string(
@@ -945,6 +946,36 @@ private struct KioskDoorbellPayload {
             keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
             in: userInfo
         )
+        diagnosticSummary = Self.describe(userInfo)
+    }
+
+    private static func describe(_ dictionary: [AnyHashable: Any], depth: Int = 0) -> String {
+        guard depth <= 3 else { return "…" }
+
+        let interestingKeys = dictionary.keys
+            .map { String(describing: $0) }
+            .sorted()
+
+        var lines = ["keys=[\(interestingKeys.joined(separator: ", "))]"]
+
+        for key in ["entity_id", "station", "station_id", "trigger_entity_id", "doorbell_entity_id"] {
+            if let value = dictionary[key] {
+                lines.append("\(key)=\(String(describing: value))")
+            }
+        }
+
+        for containerKey in ["homeassistant", "data"] {
+            if let nested = dictionary[containerKey] as? [AnyHashable: Any] {
+                lines.append("\(containerKey){\(describe(nested, depth: depth + 1))}")
+            } else if let nested = dictionary[containerKey] as? [String: Any] {
+                let converted = Dictionary<AnyHashable, Any>(
+                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
+                )
+                lines.append("\(containerKey){\(describe(converted, depth: depth + 1))}")
+            }
+        }
+
+        return lines.joined(separator: " | ")
     }
 
     /// Home Assistant mobile notifications may place custom payload values at the root,
@@ -1056,7 +1087,7 @@ private struct KioskDoorbellStation {
 
 private enum KioskDoorbellStationResolver {
     enum ResolveError: LocalizedError {
-        case stationMissing
+        case stationMissing(String)
         case triggerEntityNotFound(String)
         case triggerStationMissing(String, [String])
         case stationNotFound(String)
@@ -1064,8 +1095,8 @@ private enum KioskDoorbellStationResolver {
 
         var errorDescription: String? {
             switch self {
-            case .stationMissing:
-                return "No station routing found. Send entity_id for an entity carrying a station_* label."
+            case let .stationMissing(diagnostics):
+                return "No station routing found. Payload: \(diagnostics)"
             case let .triggerEntityNotFound(entityId):
                 return "Entity \(entityId) was not found in Home Assistant's live entity registry."
             case let .triggerStationMissing(entityId, labels):
@@ -1204,7 +1235,7 @@ private enum KioskDoorbellStationResolver {
         } else if fallbackStations.count == 1, let onlyStation = fallbackStations.first {
             stationId = onlyStation
         } else {
-            throw ResolveError.stationMissing
+            throw ResolveError.stationMissing(payload.diagnosticSummary)
         }
 
         let stationEntities = entities.filter { labels(for: $0).contains(stationId) }
