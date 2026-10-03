@@ -613,6 +613,11 @@ public class MotionDetectionManager: NSObject {
         captureDevice = freshCaptureDevice
         registerCaptureSessionNotifications()
 
+        // This capture graph is video-only. Keep AVCaptureSession away from the
+        // application's shared AVAudioSession so native kiosk MP3 playback can own
+        // the playback category independently while the camera keeps streaming.
+        captureSession.automaticallyConfiguresApplicationAudioSession = false
+
         captureSession.beginConfiguration()
         defer { captureSession.commitConfiguration() }
 
