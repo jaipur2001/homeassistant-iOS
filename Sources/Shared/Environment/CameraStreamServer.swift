@@ -65,6 +65,18 @@ public class CameraStreamServer {
         queue.sync { connections.count }
     }
 
+    public var debugListenerRunning: Bool {
+        queue.sync { listener != nil }
+    }
+
+    public var debugObservingCamera: Bool {
+        queue.sync { isObservingCamera }
+    }
+
+    public var debugEncodingFrame: Bool {
+        queue.sync { isEncodingFrame }
+    }
+
     /// The URL clients should use to consume the stream, based on the Wi-Fi
     /// interface address. `nil` when the device has no Wi-Fi IPv4 address.
     /// The `/camera` path is canonical/advertised; the server accepts any path.
@@ -573,6 +585,14 @@ public final class CameraRTSPServer {
 
     public var clientCount: Int {
         queue.sync { clients.count }
+    }
+
+    public var debugListenerRunning: Bool {
+        queue.sync { listener != nil }
+    }
+
+    public var debugEncoderRunning: Bool {
+        encoderQueue.sync { compressionSession != nil }
     }
 
     public var streamURL: String? {
