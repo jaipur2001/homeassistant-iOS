@@ -1112,9 +1112,13 @@ private enum KioskDoorbellStationResolver {
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
 
-        let displayName = doorbell?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-            .flatMap { $0.isEmpty ? nil : $0 }
-            ?? humanizedStationName(stationId)
+        let trimmedDoorbellName = doorbell?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName: String
+        if let trimmedDoorbellName, !trimmedDoorbellName.isEmpty {
+            displayName = trimmedDoorbellName
+        } else {
+            displayName = humanizedStationName(stationId)
+        }
 
         return KioskDoorbellStation(
             id: stationId,
