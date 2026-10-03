@@ -986,8 +986,12 @@ private struct KioskDoorbellPayload {
             keys: ["station", "station_id"],
             in: userInfo
         )
+        // `entity_id` is the preferred transport key: Home Assistant's
+        // mobile_app notification pipeline already preserves it reliably (the
+        // existing kiosk_show_camera command uses the same field). Custom keys
+        // such as station/trigger_entity_id may be dropped by the push pipeline.
         triggerEntityId = Self.string(
-            keys: ["trigger_entity_id", "doorbell_entity_id"],
+            keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
             in: userInfo
         )
     }
@@ -1108,7 +1112,7 @@ private enum KioskDoorbellStationResolver {
         var errorDescription: String? {
             switch self {
             case .stationMissing:
-                return "No station label or trigger entity was supplied"
+                return "No station routing found. Send entity_id for an entity carrying a station_* label."
             case let .stationNotFound(station):
                 return "No entities found for doorbell station \(station)"
             case let .cameraMissing(station):
