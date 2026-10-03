@@ -149,6 +149,39 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
     }
 
+    private func showDoorbell(from userInfo: [AnyHashable: Any]) {
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { [weak self] webViewController in
+                guard let self else { return }
+                let server = cameraServer(from: userInfo, fallback: webViewController.server)
+
+                do {
+                    let station = try KioskDoorbellStationResolver.resolve(
+                        server: server,
+                        userInfo: userInfo
+                    )
+                    KioskDoorbellOverlayPresenter.shared.show(
+                        station: station,
+                        server: server,
+                        on: webViewController
+                    )
+                } catch {
+                    Current.Log.error("Failed to resolve dynamic doorbell station: \(error)")
+                }
+            }.catch { error in
+                Current.Log.error("Failed to show dynamic doorbell overlay: \(error)")
+            }
+    }
+
+    private func hideDoorbell() {
+        Current.sceneManager.webViewControllerPromise
+            .done(on: .main) { webViewController in
+                KioskDoorbellOverlayPresenter.shared.hide(on: webViewController)
+            }.catch { error in
+                Current.Log.error("Failed to hide dynamic doorbell overlay: \(error)")
+            }
+    }
+
     private func setScreenBrightness(_ level: Float) {
         let clamped = CGFloat(min(max(level, 0), 1))
         DispatchQueue.main.async {
@@ -758,6 +791,10 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             openCamera(from: userInfo)
         case .hideCamera:
             hideCamera()
+        case .showDoorbell:
+            showDoorbell(from: userInfo)
+        case .hideDoorbell:
+            hideDoorbell()
         case .setBrightness:
             if let level = command.level(from: userInfo) {
                 setScreenBrightness(level)
@@ -856,6 +893,474 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             rootViewController?.dismiss(animated: false, completion: {
                 rootViewController?.present(hostingController, animated: true, completion: nil)
             })
+        }
+    }
+}
+
+
+private struct KioskDoorbellPayload {
+    let stationId: String?
+    let triggerEntityId: String?
+
+    init(userInfo: [AnyHashable: Any]) {
+        stationId = Self.string("station", in: userInfo)
+            ?? Self.string("station_id", in: userInfo)
+        triggerEntityId = Self.string("trigger_entity_id", in: userInfo)
+            ?? Self.string("doorbell_entity_id", in: userInfo)
+    }
+
+    private static func string(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
+        if let value = userInfo[key] as? String,
+           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return value
+        }
+        if let homeassistant = userInfo["homeassistant"] as? [String: Any],
+           let value = homeassistant[key] as? String,
+           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return value
+        }
+        if let homeassistant = userInfo["homeassistant"] as? [AnyHashable: Any],
+           let value = homeassistant[key] as? String,
+           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return value
+        }
+        return nil
+    }
+}
+
+private struct KioskDoorbellOpener: Identifiable, Equatable {
+    enum Kind: Int {
+        case door
+        case gate
+        case generic
+    }
+
+    let entityId: String
+    let name: String
+    let kind: Kind
+    let serviceDomain: String
+    let service: String
+
+    var id: String { entityId }
+
+    var buttonTitle: String {
+        switch kind {
+        case .door:
+            return "Tür öffnen"
+        case .gate:
+            return "Tor öffnen"
+        case .generic:
+            return name
+        }
+    }
+
+    var systemImage: String {
+        switch kind {
+        case .door:
+            return "lock.open.fill"
+        case .gate:
+            return "door.garage.open"
+        case .generic:
+            return "lock.open"
+        }
+    }
+}
+
+private struct KioskDoorbellStation {
+    let id: String
+    let name: String
+    let cameraEntityId: String
+    let cameraName: String?
+    let triggerEntityId: String?
+    let intercomEntityId: String?
+    let openers: [KioskDoorbellOpener]
+}
+
+private enum KioskDoorbellStationResolver {
+    enum ResolveError: LocalizedError {
+        case stationMissing
+        case stationNotFound(String)
+        case cameraMissing(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .stationMissing:
+                return "No station label or trigger entity was supplied"
+            case let .stationNotFound(station):
+                return "No entities found for doorbell station \(station)"
+            case let .cameraMissing(station):
+                return "Doorbell station \(station) has no camera with label function_camera"
+            }
+        }
+    }
+
+    private static let stationPrefix = "station_"
+    private static let functionDoorbell = "function_doorbell"
+    private static let functionCamera = "function_camera"
+    private static let functionIntercom = "function_intercom"
+    private static let functionOpener = "function_opener"
+    private static let typeDoor = "type_door"
+    private static let typeGate = "type_gate"
+
+    static func resolve(
+        server: Server,
+        userInfo: [AnyHashable: Any]
+    ) throws -> KioskDoorbellStation {
+        let serverId = server.identifier.rawValue
+        let entities = try EntityRegistryListForDisplay.Entity.config(serverId: serverId)
+        let devices = try AppDeviceRegistry.config(serverId: serverId)
+        let devicesById = Dictionary(uniqueKeysWithValues: devices.map { ($0.deviceId, $0) })
+
+        func labels(for entity: EntityRegistryListForDisplay.Entity) -> Set<String> {
+            var result = Set(entity.labels ?? [])
+            if let deviceId = entity.deviceId,
+               let device = devicesById[deviceId] {
+                result.formUnion(device.labels ?? [])
+            }
+            return result
+        }
+
+        let payload = KioskDoorbellPayload(userInfo: userInfo)
+        let requestedStation = payload.stationId.map(normalizedStationId)
+
+        let triggerEntry = payload.triggerEntityId.flatMap { triggerEntityId in
+            entities.first { $0.entityId == triggerEntityId }
+        }
+
+        let triggerStation = triggerEntry.flatMap { entry in
+            labels(for: entry)
+                .filter { $0.hasPrefix(stationPrefix) }
+                .sorted()
+                .first
+        }
+
+        let fallbackStations = Set(
+            entities.flatMap { entity -> [String] in
+                let entityLabels = labels(for: entity)
+                guard entityLabels.contains(functionDoorbell) else { return [] }
+                return entityLabels.filter { $0.hasPrefix(stationPrefix) }
+            }
+        )
+
+        let stationId: String
+        if let requestedStation {
+            stationId = requestedStation
+        } else if let triggerStation {
+            stationId = triggerStation
+        } else if fallbackStations.count == 1, let onlyStation = fallbackStations.first {
+            stationId = onlyStation
+        } else {
+            throw ResolveError.stationMissing
+        }
+
+        let stationEntities = entities.filter { labels(for: $0).contains(stationId) }
+        guard !stationEntities.isEmpty else {
+            throw ResolveError.stationNotFound(stationId)
+        }
+
+        let camera = stationEntities
+            .filter {
+                $0.entityId.hasPrefix("camera.")
+                    && labels(for: $0).contains(functionCamera)
+            }
+            .sorted { $0.entityId < $1.entityId }
+            .first
+
+        guard let camera else {
+            throw ResolveError.cameraMissing(stationId)
+        }
+
+        let doorbell = stationEntities
+            .filter { labels(for: $0).contains(functionDoorbell) }
+            .sorted { $0.entityId < $1.entityId }
+            .first
+
+        let intercom = stationEntities
+            .filter { labels(for: $0).contains(functionIntercom) }
+            .sorted { $0.entityId < $1.entityId }
+            .first
+
+        let openers = stationEntities.compactMap { entity -> KioskDoorbellOpener? in
+            let entityLabels = labels(for: entity)
+            guard entityLabels.contains(functionOpener),
+                  let service = openerService(for: entity.entityId) else {
+                return nil
+            }
+
+            let kind: KioskDoorbellOpener.Kind
+            if entityLabels.contains(typeGate) {
+                kind = .gate
+            } else if entityLabels.contains(typeDoor) {
+                kind = .door
+            } else {
+                kind = .generic
+            }
+
+            let name = entity.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return KioskDoorbellOpener(
+                entityId: entity.entityId,
+                name: name?.isEmpty == false ? name! : entity.entityId,
+                kind: kind,
+                serviceDomain: service.domain,
+                service: service.service
+            )
+        }
+        .sorted {
+            if $0.kind.rawValue != $1.kind.rawValue {
+                return $0.kind.rawValue < $1.kind.rawValue
+            }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+
+        let displayName = doorbell?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? humanizedStationName(stationId)
+
+        return KioskDoorbellStation(
+            id: stationId,
+            name: displayName,
+            cameraEntityId: camera.entityId,
+            cameraName: camera.name,
+            triggerEntityId: payload.triggerEntityId ?? doorbell?.entityId,
+            intercomEntityId: intercom?.entityId,
+            openers: openers
+        )
+    }
+
+    private static func normalizedStationId(_ value: String) -> String {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "_")
+        return normalized.hasPrefix(stationPrefix) ? normalized : stationPrefix + normalized
+    }
+
+    private static func humanizedStationName(_ stationId: String) -> String {
+        stationId
+            .replacingOccurrences(of: stationPrefix, with: "")
+            .replacingOccurrences(of: "_", with: " ")
+            .capitalized
+    }
+
+    private static func openerService(for entityId: String) -> (domain: String, service: String)? {
+        guard let domain = entityId.split(separator: ".", maxSplits: 1).first.map(String.init) else {
+            return nil
+        }
+
+        switch domain {
+        case "script":
+            return ("script", "turn_on")
+        case "button":
+            return ("button", "press")
+        case "input_button":
+            return ("input_button", "press")
+        case "lock":
+            return ("lock", "unlock")
+        case "cover":
+            return ("cover", "open_cover")
+        case "switch":
+            return ("switch", "turn_on")
+        default:
+            return nil
+        }
+    }
+}
+
+private final class KioskDoorbellOverlayPresenter {
+    static let shared = KioskDoorbellOverlayPresenter()
+
+    private weak var overlayController: UIViewController?
+    private var isTransitioning = false
+    private var pendingShow: (() -> Void)?
+
+    private init() {}
+
+    func show(
+        station: KioskDoorbellStation,
+        server: Server,
+        on webViewController: WebViewControllerProtocol
+    ) {
+        precondition(Thread.isMainThread)
+
+        let present = { [weak self, weak webViewController] in
+            guard let self, let webViewController else { return }
+            self.present(station: station, server: server, on: webViewController)
+        }
+
+        if isTransitioning {
+            pendingShow = present
+            return
+        }
+
+        if webViewController.overlayedController != nil {
+            isTransitioning = true
+            pendingShow = present
+            webViewController.dismissOverlayController(animated: false) { [weak self] in
+                guard let self else { return }
+                isTransitioning = false
+                overlayController = nil
+                let deferred = pendingShow
+                pendingShow = nil
+                deferred?()
+            }
+            return
+        }
+
+        present()
+    }
+
+    func hide(on webViewController: WebViewControllerProtocol) {
+        precondition(Thread.isMainThread)
+
+        guard let overlayController,
+              webViewController.overlayedController === overlayController else {
+            self.overlayController = nil
+            Current.kiosk.setCameraOverlayVisible(false)
+            return
+        }
+
+        isTransitioning = true
+        webViewController.dismissOverlayController(animated: true) { [weak self] in
+            self?.overlayController = nil
+            self?.isTransitioning = false
+            Current.kiosk.setCameraOverlayVisible(false)
+        }
+    }
+
+    private func present(
+        station: KioskDoorbellStation,
+        server: Server,
+        on webViewController: WebViewControllerProtocol
+    ) {
+        let controller = KioskDoorbellView(
+            station: station,
+            server: server,
+            dismiss: { [weak self, weak webViewController] in
+                guard let self, let webViewController else { return }
+                self.hide(on: webViewController)
+            },
+            performOpener: { [weak self] opener in
+                self?.perform(opener: opener, server: server)
+            }
+        )
+        .embeddedInHostingController()
+
+        controller.modalPresentationStyle = .overFullScreen
+        overlayController = controller
+        Current.kiosk.setCameraOverlayVisible(true)
+        webViewController.presentOverlayController(controller: controller, animated: true)
+
+        Current.Log.info(
+            "Doorbell overlay shown: station=\(station.id), camera=\(station.cameraEntityId), "
+                + "openers=\(station.openers.map(\.entityId))"
+        )
+    }
+
+    private func perform(opener: KioskDoorbellOpener, server: Server) {
+        guard let api = Current.api(for: server) else {
+            Current.Log.error("Doorbell opener failed: no API available")
+            return
+        }
+
+        api.callServiceWithResponse(
+            domain: opener.serviceDomain,
+            service: opener.service,
+            serviceData: ["entity_id": opener.entityId],
+            returnResponse: false
+        ).done { _ in
+            Current.Log.info(
+                "Doorbell opener executed: \(opener.entityId) via "
+                    + "\(opener.serviceDomain).\(opener.service)"
+            )
+        }.catch { error in
+            Current.Log.error("Doorbell opener \(opener.entityId) failed: \(error)")
+        }
+    }
+}
+
+private struct KioskDoorbellView: View {
+    let station: KioskDoorbellStation
+    let server: Server
+    let dismiss: () -> Void
+    let performOpener: (KioskDoorbellOpener) -> Void
+
+    @State private var pendingOpener: KioskDoorbellOpener?
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.ignoresSafeArea()
+
+            CameraPlayerView(
+                server: server,
+                cameraEntityId: station.cameraEntityId,
+                cameraName: station.cameraName,
+                allowsCameraSelection: false,
+                showsCloseButton: false
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                HStack(spacing: 10) {
+                    Image(systemName: "bell.fill")
+                    Text(station.name)
+                        .font(.title2.bold())
+                    Spacer()
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Klingeldialog schließen")
+                }
+
+                if station.intercomEntityId != nil {
+                    HStack(spacing: 8) {
+                        Image(systemName: "mic.slash.fill")
+                        Text("Gegensprechen vorbereitet")
+                        Spacer()
+                        Text("Mikrofon aus")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.subheadline)
+                }
+
+                if !station.openers.isEmpty {
+                    HStack(spacing: 12) {
+                        ForEach(station.openers) { opener in
+                            Button {
+                                pendingOpener = opener
+                            } label: {
+                                Label(opener.buttonTitle, systemImage: opener.systemImage)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                        }
+                    }
+                }
+            }
+            .padding(20)
+            .background(.ultraThinMaterial)
+        }
+        .preferredColorScheme(.dark)
+        .confirmationDialog(
+            pendingOpener.map { "\($0.buttonTitle)?" } ?? "Öffnen?",
+            isPresented: Binding(
+                get: { pendingOpener != nil },
+                set: { if !$0 { pendingOpener = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let opener = pendingOpener {
+                Button(opener.buttonTitle, role: .destructive) {
+                    performOpener(opener)
+                    pendingOpener = nil
+                }
+            }
+            Button("Abbrechen", role: .cancel) {
+                pendingOpener = nil
+            }
         }
     }
 }
