@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - kiosk-main
+      - feature/dynamic-doorbell
     paths:
       - ".github/kiosk-build-trigger"
 
