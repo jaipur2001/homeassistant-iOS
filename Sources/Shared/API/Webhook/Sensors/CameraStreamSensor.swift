@@ -1,6 +1,10 @@
 import Foundation
 import PromiseKit
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+import AVFoundation
+#endif
+
 final class CameraStreamSensorUpdateSignaler: BaseSensorUpdateSignaler, SensorProviderUpdateSignaler {
     let signal: () -> Void
 
@@ -63,6 +67,14 @@ final class CameraStreamSensor: SensorProvider {
             state: isStreaming ? "streaming" : "idle"
         )
         let rtspServer = Current.cameraRTSPServer
+        let motionDetection = Current.motionDetection
+        let audioSession = AVAudioSession.sharedInstance()
+        let lastFrameDate = motionDetection.debugLastCapturedFrameDate
+        let lastFrameAge = motionDetection.debugLastCapturedFrameAge
+        let audioOutputs = audioSession.currentRoute.outputs
+            .map { $0.portType.rawValue }
+            .joined(separator: ", ")
+
         sensor.Attributes = [
             "Port": server.port,
             "Clients": server.clientCount,
@@ -70,6 +82,34 @@ final class CameraStreamSensor: SensorProvider {
             "RTSP Port": rtspServer.port,
             "RTSP Clients": rtspServer.clientCount,
             "RTSP URL": rtspServer.streamURL ?? "unavailable (no Wi-Fi address)",
+
+            // Read-only diagnostics. These are intentionally attributes of the
+            // existing Camera Stream sensor so debugging does not add another
+            // lifecycle owner or alter the stable camera/audio behavior.
+            "Debug App Foreground": Current.isForegroundApp(),
+            "Debug Sensor Enabled": Current.sensors.isEnabled(
+                uniqueID: WebhookSensorId.cameraStream.rawValue
+            ),
+            "Debug Capture Configured": motionDetection.debugCaptureSessionConfigured,
+            "Debug Capture Running": motionDetection.debugCaptureSessionRunning,
+            "Debug Captured Frames": motionDetection.debugCapturedFrameCount,
+            "Debug Last Frame": lastFrameDate.map {
+                ISO8601DateFormatter().string(from: $0)
+            } ?? "never",
+            "Debug Last Frame Age (s)": lastFrameAge.map {
+                (100 * $0).rounded() / 100
+            } ?? -1,
+            "Debug MJPEG Active": server.isActive,
+            "Debug MJPEG Listener": server.debugListenerRunning,
+            "Debug MJPEG Camera Observer": server.debugObservingCamera,
+            "Debug MJPEG Encoding": server.debugEncodingFrame,
+            "Debug RTSP Active": rtspServer.isActive,
+            "Debug RTSP Listener": rtspServer.debugListenerRunning,
+            "Debug RTSP Encoder": rtspServer.debugEncoderRunning,
+            "Debug Audio Category": audioSession.category.rawValue,
+            "Debug Audio Mode": audioSession.mode.rawValue,
+            "Debug Audio Volume": audioSession.outputVolume,
+            "Debug Audio Outputs": audioOutputs.isEmpty ? "none" : audioOutputs,
         ]
         sensor.detailFooter = L10n.Sensors.CameraStream.detailFooter
 
