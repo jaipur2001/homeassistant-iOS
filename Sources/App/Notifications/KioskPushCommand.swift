@@ -8,6 +8,8 @@ enum KioskPushCommand: String, CaseIterable {
     case hideScreensaver = "kiosk_hide_screensaver"
     case showCamera = "kiosk_show_camera"
     case hideCamera = "kiosk_hide_camera"
+    case showDoorbell = "kiosk_show_doorbell"
+    case hideDoorbell = "kiosk_hide_doorbell"
     case setBrightness = "kiosk_set_brightness"
     case setVolume = "kiosk_set_volume"
     case playMedia = "kiosk_play_media"
@@ -40,8 +42,8 @@ enum KioskPushCommand: String, CaseIterable {
             return "level"
         case .setVolume, .playMedia:
             return "volume"
-        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .stopMedia, .showAlarm, .hideAlarm,
-             .setScreensaverMode, .reload, .defaultDashboard:
+        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .showDoorbell, .hideDoorbell,
+             .stopMedia, .showAlarm, .hideAlarm, .setScreensaverMode, .reload, .defaultDashboard:
             return nil
         }
     }
@@ -50,8 +52,9 @@ enum KioskPushCommand: String, CaseIterable {
         switch self {
         case .setScreensaverMode:
             return "mode"
-        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .setBrightness, .setVolume,
-             .playMedia, .stopMedia, .showAlarm, .hideAlarm, .setScreensaverBrightness, .reload, .defaultDashboard:
+        case .showScreensaver, .hideScreensaver, .showCamera, .hideCamera, .showDoorbell, .hideDoorbell,
+             .setBrightness, .setVolume, .playMedia, .stopMedia, .showAlarm, .hideAlarm,
+             .setScreensaverBrightness, .reload, .defaultDashboard:
             return nil
         }
     }
@@ -138,6 +141,10 @@ enum KioskPushCommand: String, CaseIterable {
             return L10n.Kiosk.PushCommand.showCamera
         case .hideCamera:
             return L10n.Kiosk.PushCommand.hideCamera
+        case .showDoorbell:
+            return "Show doorbell"
+        case .hideDoorbell:
+            return "Hide doorbell"
         case .setBrightness:
             return L10n.Kiosk.PushCommand.setBrightness
         case .setVolume:
@@ -175,6 +182,10 @@ enum KioskPushCommand: String, CaseIterable {
             return .videoFill
         case .hideCamera:
             return .videoSlashFill
+        case .showDoorbell:
+            return .bellFill
+        case .hideDoorbell:
+            return .bellSlashFill
         case .setBrightness:
             return .sunMax
         case .setVolume:
@@ -221,6 +232,10 @@ enum KioskPushCommand: String, CaseIterable {
         case .showCamera:
             return (.white, .blue)
         case .hideCamera:
+            return (.white, .gray)
+        case .showDoorbell:
+            return (.white, .orange)
+        case .hideDoorbell:
             return (.white, .gray)
         case .setBrightness:
             return (.white, .yellow)
