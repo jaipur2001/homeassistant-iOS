@@ -2,6 +2,7 @@ import AVFoundation
 import CallbackURLKit
 import FirebaseMessaging
 import Foundation
+import HAKit
 import MediaPlayer
 import PromiseKit
 import Shared
@@ -155,101 +156,51 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                 guard let self else { return }
                 let server = cameraServer(from: userInfo, fallback: webViewController.server)
 
-                do {
-                    let station = try KioskDoorbellStationResolver.resolve(
-                        server: server,
-                        userInfo: userInfo
+                KioskDoorbellStationResolver.resolveLive(
+                    server: server,
+                    userInfo: userInfo
+                )
+                .done(on: .main) { station in
+                    Current.Log.info(
+                        "Doorbell station resolved live: \(station.id), camera=\(station.cameraEntityId)"
                     )
                     KioskDoorbellOverlayPresenter.shared.show(
                         station: station,
                         server: server,
                         on: webViewController
                     )
-                } catch {
+                }
+                .catch(on: .main) { liveError in
                     Current.Log.warning(
-                        "Doorbell station not available in local registry, forcing refresh before retry: \(error)"
+                        "Live doorbell registry resolution failed, trying local cache: \(liveError)"
                     )
-                    self.refreshDoorbellRegistryAndRetry(
-                        userInfo: userInfo,
-                        server: server,
-                        webViewController: webViewController,
-                        initialError: error
-                    )
+
+                    do {
+                        let station = try KioskDoorbellStationResolver.resolve(
+                            server: server,
+                            userInfo: userInfo
+                        )
+                        Current.Log.info(
+                            "Doorbell station resolved from local cache: \(station.id)"
+                        )
+                        KioskDoorbellOverlayPresenter.shared.show(
+                            station: station,
+                            server: server,
+                            on: webViewController
+                        )
+                    } catch {
+                        Current.Log.error(
+                            "Doorbell station resolution failed. Live: \(liveError). Cache: \(error)"
+                        )
+                        KioskDoorbellOverlayPresenter.shared.showConfigurationError(
+                            message: error.localizedDescription,
+                            on: webViewController
+                        )
+                    }
                 }
             }.catch { error in
                 Current.Log.error("Failed to show dynamic doorbell overlay: \(error)")
             }
-    }
-
-    private func refreshDoorbellRegistryAndRetry(
-        userInfo: [AnyHashable: Any],
-        server: Server,
-        webViewController: WebViewControllerProtocol,
-        initialError: Error
-    ) {
-        var observer: NSObjectProtocol?
-        var didFinish = false
-
-        func finishRetry() {
-            guard !didFinish else { return }
-            didFinish = true
-
-            if let observer {
-                NotificationCenter.default.removeObserver(observer)
-            }
-
-            DispatchQueue.main.async { [weak self, weak webViewController] in
-                guard let self, let webViewController else { return }
-
-                do {
-                    let station = try KioskDoorbellStationResolver.resolve(
-                        server: server,
-                        userInfo: userInfo
-                    )
-                    Current.Log.info(
-                        "Doorbell station resolved after forced registry refresh: \(station.id)"
-                    )
-                    KioskDoorbellOverlayPresenter.shared.show(
-                        station: station,
-                        server: server,
-                        on: webViewController
-                    )
-                } catch {
-                    Current.Log.error(
-                        "Doorbell station resolution failed after forced registry refresh. "
-                            + "Initial error: \(initialError). Retry error: \(error)"
-                    )
-                    KioskDoorbellOverlayPresenter.shared.showConfigurationError(
-                        message: error.localizedDescription,
-                        on: webViewController
-                    )
-                }
-            }
-        }
-
-        observer = NotificationCenter.default.addObserver(
-            forName: .appDatabaseUpdaterDidFinishRoutine,
-            object: nil,
-            queue: .main
-        ) { notification in
-            guard let updatedServer = notification.object as? Server,
-                  updatedServer.identifier == server.identifier else {
-                return
-            }
-            finishRetry()
-        }
-
-        Current.appDatabaseUpdater.update(
-            server: server,
-            forceUpdate: true,
-            showProgress: false
-        )
-
-        // A failed/cancelled refresh may never emit the completion notification.
-        // Retry once from the current cache anyway, but never leave the doorbell command silent.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
-            finishRetry()
-        }
     }
 
     private func hideDoorbell() {
@@ -1106,6 +1057,8 @@ private struct KioskDoorbellStation {
 private enum KioskDoorbellStationResolver {
     enum ResolveError: LocalizedError {
         case stationMissing
+        case triggerEntityNotFound(String)
+        case triggerStationMissing(String, [String])
         case stationNotFound(String)
         case cameraMissing(String)
 
@@ -1113,6 +1066,10 @@ private enum KioskDoorbellStationResolver {
             switch self {
             case .stationMissing:
                 return "No station routing found. Send entity_id for an entity carrying a station_* label."
+            case let .triggerEntityNotFound(entityId):
+                return "Entity \(entityId) was not found in Home Assistant's live entity registry."
+            case let .triggerStationMissing(entityId, labels):
+                return "Entity \(entityId) was found, but has no station_* label. Labels seen: \(labels.joined(separator: ", "))."
             case let .stationNotFound(station):
                 return "No entities found for doorbell station \(station)"
             case let .cameraMissing(station):
@@ -1136,13 +1093,70 @@ private enum KioskDoorbellStationResolver {
         let serverId = server.identifier.rawValue
         let entities = try EntityRegistryListForDisplay.Entity.config(serverId: serverId)
         let devices = try AppDeviceRegistry.config(serverId: serverId)
-        let devicesById = Dictionary(uniqueKeysWithValues: devices.map { ($0.deviceId, $0) })
+        let deviceLabelsById = Dictionary(
+            uniqueKeysWithValues: devices.map {
+                ($0.deviceId, Set($0.labels ?? []))
+            }
+        )
 
+        return try resolve(
+            userInfo: userInfo,
+            entities: entities,
+            deviceLabelsById: deviceLabelsById
+        )
+    }
+
+    static func resolveLive(
+        server: Server,
+        userInfo: [AnyHashable: Any]
+    ) -> Promise<KioskDoorbellStation> {
+        guard let api = Current.api(for: server) else {
+            return Promise(error: HomeAssistantAPI.APIError.noAPIAvailable)
+        }
+
+        let entitiesPromise = Promise<EntityRegistryListForDisplay> { seal in
+            api.connection.send(
+                HATypedRequest<EntityRegistryListForDisplay>.configEntityRegistryListForDisplay()
+            ) { result in
+                seal.resolve(result)
+            }
+        }
+
+        return entitiesPromise.then { response -> Promise<KioskDoorbellStation> in
+            let devicesPromise = Promise<[DeviceRegistryEntry]> { seal in
+                api.connection.send(
+                    HATypedRequest<[DeviceRegistryEntry]>.configDeviceRegistryList()
+                ) { result in
+                    seal.resolve(result)
+                }
+            }
+
+            return devicesPromise.map { devices in
+                let deviceLabelsById = Dictionary(
+                    uniqueKeysWithValues: devices.map {
+                        ($0.id, Set($0.labels ?? []))
+                    }
+                )
+
+                return try resolve(
+                    userInfo: userInfo,
+                    entities: response.entities,
+                    deviceLabelsById: deviceLabelsById
+                )
+            }
+        }
+    }
+
+    private static func resolve(
+        userInfo: [AnyHashable: Any],
+        entities: [EntityRegistryListForDisplay.Entity],
+        deviceLabelsById: [String: Set<String>]
+    ) throws -> KioskDoorbellStation {
         func labels(for entity: EntityRegistryListForDisplay.Entity) -> Set<String> {
             var result = Set(entity.labels ?? [])
             if let deviceId = entity.deviceId,
-               let device = devicesById[deviceId] {
-                result.formUnion(device.labels ?? [])
+               let deviceLabels = deviceLabelsById[deviceId] {
+                result.formUnion(deviceLabels)
             }
             return result
         }
@@ -1154,11 +1168,24 @@ private enum KioskDoorbellStationResolver {
             entities.first { $0.entityId == triggerEntityId }
         }
 
-        let triggerStation = triggerEntry.flatMap { entry in
-            labels(for: entry)
-                .filter { $0.hasPrefix(stationPrefix) }
-                .sorted()
-                .first
+        if let triggerEntityId = payload.triggerEntityId,
+           triggerEntry == nil {
+            throw ResolveError.triggerEntityNotFound(triggerEntityId)
+        }
+
+        let triggerLabels = triggerEntry.map(labels) ?? []
+        let triggerStation = triggerLabels
+            .filter { $0.hasPrefix(stationPrefix) }
+            .sorted()
+            .first
+
+        if let triggerEntry,
+           requestedStation == nil,
+           triggerStation == nil {
+            throw ResolveError.triggerStationMissing(
+                triggerEntry.entityId,
+                triggerLabels.sorted()
+            )
         }
 
         let fallbackStations = Set(
