@@ -13,6 +13,8 @@ struct CameraPlayerView: View {
     @Environment(\.dismiss) private var dismiss
     private let server: Server
     private let cameraName: String?
+    private let allowsCameraSelection: Bool
+    private let showsCloseButton: Bool
 
     @State private var cameraEntityId: String
     /// The streaming methods to try for the current camera and which one is showing.
@@ -33,10 +35,18 @@ struct CameraPlayerView: View {
     private let maxTitleTextWidth: CGFloat = 100
     private let topScrimHeight: CGFloat = 140
 
-    init(server: Server, cameraEntityId: String, cameraName: String? = nil) {
+    init(
+        server: Server,
+        cameraEntityId: String,
+        cameraName: String? = nil,
+        allowsCameraSelection: Bool = true,
+        showsCloseButton: Bool = true
+    ) {
         self.server = server
         self._cameraEntityId = State(initialValue: cameraEntityId)
         self.cameraName = cameraName
+        self.allowsCameraSelection = allowsCameraSelection
+        self.showsCloseButton = showsCloseButton
     }
 
     var body: some View {
@@ -92,9 +102,11 @@ struct CameraPlayerView: View {
                 // player type. Matches the curve WebRTC uses for the rest of the controls.
                 .animation(.easeInOut(duration: 0.2), value: isToolbarVisible)
                 .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        CloseButton {
-                            dismiss()
+                    if showsCloseButton {
+                        ToolbarItem(placement: .topBarLeading) {
+                            CloseButton {
+                                dismiss()
+                            }
                         }
                     }
 
@@ -185,7 +197,7 @@ struct CameraPlayerView: View {
                                 .truncationMode(.middle)
                         }
                     }
-                    if cameras.count > 1 {
+                    if allowsCameraSelection, cameras.count > 1 {
                         Image(systemSymbol: .chevronUpChevronDown)
                             .font(DesignSystem.Font.caption2)
                             .foregroundStyle(.secondary)
@@ -195,7 +207,7 @@ struct CameraPlayerView: View {
                 .padding(.vertical, DesignSystem.Spaces.one)
             }
             .menuOrder(.fixed)
-            .disabled(cameras.count <= 1)
+            .disabled(!allowsCameraSelection || cameras.count <= 1)
         }
     }
 
