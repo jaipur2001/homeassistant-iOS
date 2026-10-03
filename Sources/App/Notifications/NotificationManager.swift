@@ -157,26 +157,62 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         }
     }
 
-    private func setSystemVolume(_ level: Float) {
+    private func setSystemVolume(_ level: Float, completion: (() -> Void)? = nil) {
         let clamped = min(max(level, 0), 1)
+
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { [weak self] webViewController in
-                guard let self else { return }
+                guard let self else {
+                    completion?()
+                    return
+                }
+
                 if volumeControlView.superview == nil {
                     webViewController.view.addSubview(volumeControlView)
+                    volumeControlView.layoutIfNeeded()
                 }
-                // The slider only exists once the view is in the hierarchy, so read it on the next loop.
-                DispatchQueue.main.async {
+
+                func applyVolume(attempt: Int) {
                     guard let slider = self.volumeControlView.subviews.compactMap({ $0 as? UISlider }).first else {
                         Current.Log.error("Unable to locate system volume slider for kiosk command")
+                        completion?()
                         return
                     }
+
                     slider.setValue(clamped, animated: false)
+                    slider.sendActions(for: .valueChanged)
                     slider.sendActions(for: .touchUpInside)
-                    Current.Log.info("Kiosk set system volume to \(clamped)")
+
+                    // MPVolumeView updates the hardware volume asynchronously. Verify
+                    // the value iOS reports before starting alarm/media playback.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        let actualVolume = AVAudioSession.sharedInstance().outputVolume
+                        let delta = abs(actualVolume - clamped)
+
+                        if delta > 0.05, attempt < 2 {
+                            Current.Log.warning(
+                                "Kiosk system volume not settled yet: requested=\(clamped), "
+                                    + "actual=\(actualVolume), retry=\(attempt + 1)"
+                            )
+                            applyVolume(attempt: attempt + 1)
+                            return
+                        }
+
+                        Current.Log.info(
+                            "Kiosk system volume settled: requested=\(clamped), actual=\(actualVolume)"
+                        )
+                        completion?()
+                    }
                 }
-            }.catch { error in
+
+                // Let MPVolumeView finish attaching to the window before locating its slider.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    applyVolume(attempt: 0)
+                }
+            }
+            .catch { error in
                 Current.Log.error("Failed to set volume from push command: \(error)")
+                completion?()
             }
     }
 
@@ -190,9 +226,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             return
         }
 
-        if let requestedVolume = command.level(from: userInfo) {
-            setSystemVolume(requestedVolume)
-        }
+        let requestedVolume = command.level(from: userInfo)
 
         Current.Log.info("Native kiosk audio requested: \(mediaContentId)")
 
@@ -216,7 +250,14 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     .done(on: .main) { [weak self] localFileURL in
                         guard let self else { return }
                         Current.Log.info("Native kiosk media downloaded to \(localFileURL.path)")
-                        self.startKioskAudio(fileURL: localFileURL)
+
+                        if let requestedVolume {
+                            self.setSystemVolume(requestedVolume) { [weak self] in
+                                self?.startKioskAudio(fileURL: localFileURL)
+                            }
+                        } else {
+                            self.startKioskAudio(fileURL: localFileURL)
+                        }
                     }
                     .catch { error in
                         Current.Log.error(
