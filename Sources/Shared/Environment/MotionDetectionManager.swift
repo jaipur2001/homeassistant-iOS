@@ -156,6 +156,30 @@ public class MotionDetectionManager: NSObject {
     /// this value before/after a short grace period so a session that reports
     /// `isRunning == true` but produces no frames can be recovered after cold boot.
     private let capturedFrameCount = HAProtected<Int>(value: 0)
+    private let lastCapturedFrameDate = HAProtected<Date?>(value: nil)
+
+    /// Lightweight read-only diagnostics for the kiosk Camera Stream sensor.
+    /// These do not alter capture ownership or recovery behavior.
+    public var debugCapturedFrameCount: Int {
+        capturedFrameCount.read { $0 }
+    }
+
+    public var debugLastCapturedFrameDate: Date? {
+        lastCapturedFrameDate.read { $0 }
+    }
+
+    public var debugLastCapturedFrameAge: TimeInterval? {
+        guard let date = debugLastCapturedFrameDate else { return nil }
+        return max(0, Current.date().timeIntervalSince(date))
+    }
+
+    public var debugCaptureSessionRunning: Bool {
+        captureSession.isRunning
+    }
+
+    public var debugCaptureSessionConfigured: Bool {
+        isCaptureSessionConfigured
+    }
 
     /// Session-queue-owned recovery state. Incrementing the generation invalidates
     /// already scheduled watchdog checks without needing to cancel DispatchWorkItems.
@@ -728,6 +752,7 @@ extension MotionDetectionManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         capturedFrameCount.mutate { $0 += 1 }
+        lastCapturedFrameDate.mutate { $0 = Current.date() }
 
         // Feed both local camera transports from the same capture frame.
         // Each transport drops work internally when it has no active consumer.
