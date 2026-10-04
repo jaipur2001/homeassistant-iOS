@@ -1257,6 +1257,7 @@ private struct KioskDoorbellStation {
     let cameraName: String?
     let triggerEntityId: String?
     let intercomEntityId: String?
+    let timeoutEntityId: String?
     let openers: [KioskDoorbellOpener]
 }
 
@@ -1289,6 +1290,7 @@ private enum KioskDoorbellStationResolver {
     private static let functionCamera = "function_camera"
     private static let functionIntercom = "function_intercom"
     private static let functionOpener = "function_opener"
+    private static let functionDoorbellTimeout = "function_doorbell_timeout"
     private static let typeDoor = "type_door"
     private static let typeGate = "type_gate"
 
@@ -1445,6 +1447,26 @@ private enum KioskDoorbellStationResolver {
             .sorted { $0.entityId < $1.entityId }
             .first
 
+        let stationTimeout = stationEntities
+            .filter {
+                $0.entityId.hasPrefix("input_number.")
+                    && labels(for: $0).contains(functionDoorbellTimeout)
+            }
+            .sorted { $0.entityId < $1.entityId }
+            .first
+
+        let globalTimeout = entities
+            .filter { entity in
+                let entityLabels = labels(for: entity)
+                return entity.entityId.hasPrefix("input_number.")
+                    && entityLabels.contains(functionDoorbellTimeout)
+                    && !entityLabels.contains(where: { $0.hasPrefix(stationPrefix) })
+            }
+            .sorted { $0.entityId < $1.entityId }
+            .first
+
+        let timeoutEntity = stationTimeout ?? globalTimeout
+
         let openers = stationEntities.compactMap { entity -> KioskDoorbellOpener? in
             let entityLabels = labels(for: entity)
             guard entityLabels.contains(functionOpener),
@@ -1492,6 +1514,7 @@ private enum KioskDoorbellStationResolver {
             cameraName: camera.name,
             triggerEntityId: payload.triggerEntityId ?? doorbell?.entityId,
             intercomEntityId: intercom?.entityId,
+            timeoutEntityId: timeoutEntity?.entityId,
             openers: openers
         )
     }
@@ -1531,6 +1554,70 @@ private enum KioskDoorbellStationResolver {
             return ("switch", "turn_on")
         default:
             return nil
+        }
+    }
+}
+
+private enum KioskDoorbellTimeoutResolver {
+    static let defaultSeconds: TimeInterval = 120
+
+    static func fetch(
+        server: Server,
+        entityId: String?,
+        completion: @escaping (TimeInterval) -> Void
+    ) {
+        guard let entityId else {
+            Current.Log.info(
+                "Doorbell timeout helper not configured; using default \(Int(defaultSeconds))s"
+            )
+            DispatchQueue.main.async {
+                completion(defaultSeconds)
+            }
+            return
+        }
+
+        guard let api = Current.api(for: server) else {
+            Current.Log.warning(
+                "Doorbell timeout state unavailable: no API for server; using default \(Int(defaultSeconds))s"
+            )
+            DispatchQueue.main.async {
+                completion(defaultSeconds)
+            }
+            return
+        }
+
+        api.connection.send(
+            HATypedRequest<HAEntity>.fetchState(entityId: entityId)
+        ) { result in
+            let seconds: TimeInterval
+            switch result {
+            case let .success(entity):
+                if let value = Double(entity.state),
+                   value.isFinite,
+                   value > 0 {
+                    seconds = value
+                    Current.Log.info(
+                        "Doorbell timeout resolved live: entity=\(entityId), seconds=\(value)"
+                    )
+                } else {
+                    seconds = defaultSeconds
+                    Current.Log.warning(
+                        "Doorbell timeout helper \(entityId) has invalid state '\(entity.state)'; "
+                            + "using default \(Int(defaultSeconds))s"
+                    )
+                }
+
+            case let .failure(error):
+                seconds = defaultSeconds
+                Current.Log.warning(
+                    "Doorbell timeout state fetch failed for \(entityId): \(error); "
+                        + "using default \(Int(defaultSeconds))s"
+                )
+            }
+
+            DispatchQueue.main.async {
+                completion(seconds)
+            }
         }
     }
 }
@@ -1736,6 +1823,9 @@ private struct KioskDoorbellView: View {
 
     @State private var pendingOpener: KioskDoorbellOpener?
     @State private var isMicrophoneEnabled = false
+    @State private var timeoutSeconds = KioskDoorbellTimeoutResolver.defaultSeconds
+    @State private var timeoutWorkItem: DispatchWorkItem?
+    @State private var isEnding = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -1824,6 +1914,20 @@ private struct KioskDoorbellView: View {
             .background(.ultraThinMaterial)
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            restartAutoCloseTimer()
+            loadTimeout()
+        }
+        .onChange(of: isMicrophoneEnabled) { enabled in
+            if enabled {
+                cancelAutoCloseTimer()
+            } else if !isEnding {
+                restartAutoCloseTimer()
+            }
+        }
+        .onDisappear {
+            cancelAutoCloseTimer()
+        }
         .confirmationDialog(
             pendingOpener.map { "\($0.buttonTitle)?" } ?? "Öffnen?",
             isPresented: Binding(
@@ -1848,8 +1952,8 @@ private struct KioskDoorbellView: View {
         guard station.intercomEntityId != nil else { return }
 
         if !isMicrophoneEnabled {
-            // Stop ringing before the future intercom audio session changes to
-            // playAndRecord/voiceChat. Never restart ringing when muting again.
+            // Stop ringing before the intercom audio session changes to playAndRecord/voiceChat.
+            // Ringing never restarts when the microphone is disabled again.
             stopRingtone()
         }
 
@@ -1859,7 +1963,51 @@ private struct KioskDoorbellView: View {
         )
     }
 
+    private func loadTimeout() {
+        KioskDoorbellTimeoutResolver.fetch(
+            server: server,
+            entityId: station.timeoutEntityId
+        ) { seconds in
+            guard !isEnding else { return }
+            timeoutSeconds = seconds
+            if !isMicrophoneEnabled {
+                restartAutoCloseTimer()
+            }
+        }
+    }
+
+    private func restartAutoCloseTimer() {
+        cancelAutoCloseTimer()
+        guard !isEnding, !isMicrophoneEnabled, timeoutSeconds > 0 else { return }
+
+        let seconds = timeoutSeconds
+        let workItem = DispatchWorkItem {
+            guard !isEnding, !isMicrophoneEnabled else { return }
+            Current.Log.info(
+                "Doorbell auto-close timeout reached: station=\(station.id), seconds=\(seconds)"
+            )
+            hangUp()
+        }
+        timeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + seconds,
+            execute: workItem
+        )
+
+        Current.Log.info(
+            "Doorbell auto-close armed: station=\(station.id), seconds=\(seconds)"
+        )
+    }
+
+    private func cancelAutoCloseTimer() {
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+    }
+
     private func hangUp() {
+        guard !isEnding else { return }
+        isEnding = true
+        cancelAutoCloseTimer()
         stopRingtone()
 
         if isMicrophoneEnabled {
