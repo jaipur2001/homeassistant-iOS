@@ -15,6 +15,9 @@ struct CameraPlayerView: View {
     private let cameraName: String?
     private let allowsCameraSelection: Bool
     private let showsCloseButton: Bool
+    private let supportsTalkback: Bool
+    private let talkbackRequested: Binding<Bool>?
+    private let showsWebRTCTalkbackControls: Bool
 
     @State private var cameraEntityId: String
     /// The streaming methods to try for the current camera and which one is showing.
@@ -40,13 +43,19 @@ struct CameraPlayerView: View {
         cameraEntityId: String,
         cameraName: String? = nil,
         allowsCameraSelection: Bool = true,
-        showsCloseButton: Bool = true
+        showsCloseButton: Bool = true,
+        supportsTalkback: Bool = false,
+        talkbackRequested: Binding<Bool>? = nil,
+        showsWebRTCTalkbackControls: Bool = true
     ) {
         self.server = server
         self._cameraEntityId = State(initialValue: cameraEntityId)
         self.cameraName = cameraName
         self.allowsCameraSelection = allowsCameraSelection
         self.showsCloseButton = showsCloseButton
+        self.supportsTalkback = supportsTalkback
+        self.talkbackRequested = talkbackRequested
+        self.showsWebRTCTalkbackControls = showsWebRTCTalkbackControls
     }
 
     var body: some View {
@@ -237,6 +246,9 @@ struct CameraPlayerView: View {
                 cameraName: name ?? cameraName,
                 controlsVisible: $controlsVisible,
                 showLoader: $showLoader,
+                supportsTalkback: supportsTalkback,
+                externalTalkback: talkbackRequested,
+                showsTalkbackControls: showsWebRTCTalkbackControls,
                 onWebRTCUnsupported: {
                     advanceToNextPlayer(from: .webRTC)
                 }
