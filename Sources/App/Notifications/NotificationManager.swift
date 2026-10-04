@@ -1746,7 +1746,10 @@ private struct KioskDoorbellView: View {
                 cameraEntityId: station.cameraEntityId,
                 cameraName: station.cameraName,
                 allowsCameraSelection: false,
-                showsCloseButton: false
+                showsCloseButton: false,
+                supportsTalkback: station.intercomEntityId != nil,
+                talkbackRequested: $isMicrophoneEnabled,
+                showsWebRTCTalkbackControls: false
             )
             .ignoresSafeArea()
 
