@@ -206,6 +206,13 @@ public extension HATypedRequest {
         ))
     }
 
+    /// Fetches the current live state of one entity without downloading the complete state list.
+    static func fetchState(entityId: String) -> HATypedRequest<HAEntity> {
+        HATypedRequest<HAEntity>(request: .init(
+            type: .rest(.get, "states/\(entityId)")
+        ))
+    }
+
     static func configEntityRegistryListForDisplay() -> HATypedRequest<EntityRegistryListForDisplay> {
         HATypedRequest<EntityRegistryListForDisplay>(request: .init(
             type: .webSocket("config/entity_registry/list_for_display")
