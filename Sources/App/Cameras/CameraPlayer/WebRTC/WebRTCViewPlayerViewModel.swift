@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import HAKit
 import Shared
@@ -113,6 +114,7 @@ final class WebRTCViewPlayerViewModel: ObservableObject {
     private let cameraEntityId: String
     private let supportsTalkback: Bool
     private let makeClient: (WebRTCClientConfiguration) -> WebRTCStreamClient
+    private let makeTalkbackClient: (WebRTCClientConfiguration) -> WebRTCStreamClient
     private let timing: Timing
 
     @Published var failureReason: String?
@@ -134,14 +136,22 @@ final class WebRTCViewPlayerViewModel: ObservableObject {
         server: Server,
         cameraEntityId: String,
         supportsTalkback: Bool = false,
-        makeClient: @escaping (WebRTCClientConfiguration) -> WebRTCStreamClient = { WebRTCClient(configuration: $0) },
+        makeClient: @escaping (WebRTCClientConfiguration) -> WebRTCStreamClient = {
+            WebRTCClient(configuration: $0)
+        },
+        makeTalkbackClient: @escaping (WebRTCClientConfiguration) -> WebRTCStreamClient = {
+            WebRTCClient(configuration: $0, supportsTalkback: true)
+        },
         timing: Timing = .production
     ) {
         self.server = server
         self.cameraEntityId = cameraEntityId
         self.supportsTalkback = supportsTalkback
         self.makeClient = makeClient
+        self.makeTalkbackClient = makeTalkbackClient
         self.timing = timing
+        self.isTalkbackSupported = supportsTalkback
+        self.isMuted = supportsTalkback ? false : true
     }
 
     deinit {
@@ -154,7 +164,60 @@ final class WebRTCViewPlayerViewModel: ObservableObject {
         webRTCClient?.closeConnection()
     }
 
-    func toggleTalkback() {}
+    func toggleTalkback() {
+        setTalkbackEnabled(!isTalking)
+    }
+
+    func setTalkbackEnabled(_ enabled: Bool) {
+        guard supportsTalkback else {
+            isTalking = false
+            return
+        }
+
+        guard enabled else {
+            if let webRTCClient {
+                _ = webRTCClient.setTalkbackEnabled(false)
+            }
+            isTalking = false
+            return
+        }
+
+        let session = AVAudioSession.sharedInstance()
+        switch session.recordPermission {
+        case .granted:
+            applyTalkbackEnabled(true)
+        case .undetermined:
+            session.requestRecordPermission { [weak self] granted in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if granted {
+                        self.applyTalkbackEnabled(true)
+                    } else {
+                        self.isTalking = false
+                        Current.Log.warning("WebRTC talkback microphone permission denied")
+                    }
+                }
+            }
+        case .denied:
+            isTalking = false
+            Current.Log.warning("WebRTC talkback microphone permission denied")
+        @unknown default:
+            isTalking = false
+            Current.Log.warning("Unknown microphone permission state for WebRTC talkback")
+        }
+    }
+
+    private func applyTalkbackEnabled(_ enabled: Bool) {
+        guard let webRTCClient else {
+            isTalking = false
+            return
+        }
+
+        isTalking = webRTCClient.setTalkbackEnabled(enabled)
+        if enabled, !isTalking {
+            Current.Log.error("WebRTC talkback audio track could not be enabled")
+        }
+    }
 
     func toggleMute() {
         guard let webRTCClient else { return }
@@ -196,6 +259,7 @@ final class WebRTCViewPlayerViewModel: ObservableObject {
         backgroundedAt = nil
         cancelTimeout()
         cancelDisconnectRecovery()
+        setTalkbackEnabled(false)
         tearDownConnection()
     }
 
@@ -304,9 +368,17 @@ final class WebRTCViewPlayerViewModel: ObservableObject {
         // The server answered, so whatever killed the last socket is behind us and a later attempt
         // has no reason to distrust the connection state again.
         didStallOnSignaling = false
-        let client = makeClient(configuration)
+        let client = supportsTalkback ? makeTalkbackClient(configuration) : makeClient(configuration)
         webRTCClient = client
         client.delegate = self
+
+        if supportsTalkback {
+            // Doorbell intercom should hear the remote microphone immediately; only the local
+            // microphone remains gated behind the user's explicit Mic button.
+            client.unmuteAudio()
+            isMuted = client.isAudioMuted()
+        }
+
         if let renderer {
             client.renderRemoteVideo(to: renderer)
         }
@@ -379,6 +451,7 @@ final class WebRTCViewPlayerViewModel: ObservableObject {
         offerSubscription = nil
         webRTCClient?.closeConnection()
         webRTCClient = nil
+        isTalking = false
         sessionId = nil
         pendingCandidates.removeAll()
     }
