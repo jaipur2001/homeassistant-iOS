@@ -23,6 +23,21 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertEqual(KioskPushCommand(message: "  KIOSK_Show_Screensaver \n"), .showScreensaver)
     }
 
+    func testDoorbellCommandParsesMessageRoutingArgument() {
+        XCTAssertEqual(
+            KioskPushCommand(message: "kiosk_show_doorbell|station_haustuer"),
+            .showDoorbell
+        )
+        XCTAssertEqual(
+            KioskPushCommand.argument(from: "kiosk_show_doorbell|station_haustuer"),
+            "station_haustuer"
+        )
+        XCTAssertEqual(
+            KioskPushCommand.argument(from: "kiosk_show_doorbell|binary_sensor.klingel_haustuer"),
+            "binary_sensor.klingel_haustuer"
+        )
+    }
+
     func testUnknownKioskTokenReturnsNil() {
         XCTAssertNil(KioskPushCommand(message: "kiosk_unknown_command"))
     }
