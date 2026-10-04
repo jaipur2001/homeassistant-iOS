@@ -27,6 +27,9 @@ struct WebRTCVideoPlayerView: View, AppCameraView {
     private let server: Server
     private let cameraEntityId: String
     private let cameraName: String?
+    private let supportsTalkback: Bool
+    private let externalTalkback: Binding<Bool>?
+    private let showsTalkbackControls: Bool
     private let onWebRTCUnsupported: (() -> Void)?
 
     init(
@@ -35,18 +38,24 @@ struct WebRTCVideoPlayerView: View, AppCameraView {
         cameraName: String? = nil,
         controlsVisible: Binding<Bool>,
         showLoader: Binding<Bool>,
+        supportsTalkback: Bool = false,
+        externalTalkback: Binding<Bool>? = nil,
+        showsTalkbackControls: Bool = true,
         onWebRTCUnsupported: (() -> Void)? = nil
     ) {
         self.server = server
         self.cameraEntityId = cameraEntityId
         self.cameraName = cameraName
+        self.supportsTalkback = supportsTalkback
+        self.externalTalkback = externalTalkback
+        self.showsTalkbackControls = showsTalkbackControls
         self.onWebRTCUnsupported = onWebRTCUnsupported
         self.controlsVisible = controlsVisible
         self.showLoader = showLoader
         self._viewModel = .init(wrappedValue: WebRTCViewPlayerViewModel(
             server: server,
             cameraEntityId: cameraEntityId,
-            supportsTalkback: true
+            supportsTalkback: supportsTalkback
         ))
     }
 
@@ -54,7 +63,7 @@ struct WebRTCVideoPlayerView: View, AppCameraView {
         GeometryReader { geometry in
             WebRTCVideoPlayerControlsView(
                 controlsVisible: controlsVisible,
-                isTalkbackSupported: viewModel.isTalkbackSupported,
+                isTalkbackSupported: showsTalkbackControls && viewModel.isTalkbackSupported,
                 isTalking: viewModel.isTalking,
                 isMuted: viewModel.isMuted,
                 onToggleTalkback: viewModel.toggleTalkback,
@@ -103,6 +112,23 @@ struct WebRTCVideoPlayerView: View, AppCameraView {
             }
             .onChange(of: viewModel.showLoader) { showLoader in
                 self.showLoader.wrappedValue = showLoader
+            }
+            .onChange(of: externalTalkback?.wrappedValue ?? false) { requested in
+                guard supportsTalkback else { return }
+                guard requested != viewModel.isTalking else { return }
+                viewModel.setTalkbackEnabled(requested)
+            }
+            .onChange(of: viewModel.isTalking) { talking in
+                guard let externalTalkback,
+                      externalTalkback.wrappedValue != talking else {
+                    return
+                }
+                externalTalkback.wrappedValue = talking
+            }
+            .onDisappear {
+                if let externalTalkback, externalTalkback.wrappedValue {
+                    externalTalkback.wrappedValue = false
+                }
             }
             // The frontend player keeps a hidden stream alive briefly and starts a new one when the
             // page comes back; the peer connection here does not survive iOS suspending the app, so
