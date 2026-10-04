@@ -150,7 +150,10 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
     }
 
-    private func showDoorbell(from userInfo: [AnyHashable: Any]) {
+    private func showDoorbell(
+        from userInfo: [AnyHashable: Any],
+        message: String
+    ) {
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
@@ -158,7 +161,8 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
                 KioskDoorbellStationResolver.resolveLive(
                     server: server,
-                    userInfo: userInfo
+                    userInfo: userInfo,
+                    message: message
                 )
                 .done(on: .main) { station in
                     Current.Log.info(
@@ -178,7 +182,8 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     do {
                         let station = try KioskDoorbellStationResolver.resolve(
                             server: server,
-                            userInfo: userInfo
+                            userInfo: userInfo,
+                            message: message
                         )
                         Current.Log.info(
                             "Doorbell station resolved from local cache: \(station.id)"
@@ -797,7 +802,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             return nil
         }
 
-        performKioskCommand(command, userInfo: content.userInfo)
+        performKioskCommand(command, userInfo: content.userInfo, message: message)
 
         // The command already ran above; the toast is only its visual confirmation, which the user can
         // switch off for a kiosk that should react silently.
@@ -811,7 +816,11 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         return []
     }
 
-    private func performKioskCommand(_ command: KioskPushCommand, userInfo: [AnyHashable: Any]) {
+    private func performKioskCommand(
+        _ command: KioskPushCommand,
+        userInfo: [AnyHashable: Any],
+        message: String
+    ) {
         switch command {
         case .showScreensaver:
             Current.kiosk.requestScreensaver(.show)
@@ -822,7 +831,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         case .hideCamera:
             hideCamera()
         case .showDoorbell:
-            showDoorbell(from: userInfo)
+            showDoorbell(from: userInfo, message: message)
         case .hideDoorbell:
             hideDoorbell()
         case .setBrightness:
@@ -933,20 +942,37 @@ private struct KioskDoorbellPayload {
     let triggerEntityId: String?
     let diagnosticSummary: String
 
-    init(userInfo: [AnyHashable: Any]) {
-        stationId = Self.string(
-            keys: ["station", "station_id"],
-            in: userInfo
-        )
-        // `entity_id` is the preferred transport key: Home Assistant's
-        // mobile_app notification pipeline already preserves it reliably (the
-        // existing kiosk_show_camera command uses the same field). Custom keys
-        // such as station/trigger_entity_id may be dropped by the push pipeline.
-        triggerEntityId = Self.string(
-            keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
-            in: userInfo
-        )
-        diagnosticSummary = Self.describe(userInfo)
+    init(
+        userInfo: [AnyHashable: Any],
+        message: String? = nil
+    ) {
+        let routedArgument = message.flatMap(KioskPushCommand.argument(from:))
+
+        if let routedArgument, routedArgument.contains(".") {
+            stationId = Self.string(
+                keys: ["station", "station_id"],
+                in: userInfo
+            )
+            triggerEntityId = routedArgument
+        } else if let routedArgument {
+            stationId = routedArgument
+            triggerEntityId = Self.string(
+                keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
+                in: userInfo
+            )
+        } else {
+            stationId = Self.string(
+                keys: ["station", "station_id"],
+                in: userInfo
+            )
+            triggerEntityId = Self.string(
+                keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
+                in: userInfo
+            )
+        }
+
+        let messageDiagnostic = routedArgument.map { " | message_route=\($0)" } ?? ""
+        diagnosticSummary = Self.describe(userInfo) + messageDiagnostic
     }
 
     private static func describe(_ dictionary: [AnyHashable: Any], depth: Int = 0) -> String {
@@ -1119,7 +1145,8 @@ private enum KioskDoorbellStationResolver {
 
     static func resolve(
         server: Server,
-        userInfo: [AnyHashable: Any]
+        userInfo: [AnyHashable: Any],
+        message: String? = nil
     ) throws -> KioskDoorbellStation {
         let serverId = server.identifier.rawValue
         let entities = try EntityRegistryListForDisplay.Entity.config(serverId: serverId)
@@ -1132,6 +1159,7 @@ private enum KioskDoorbellStationResolver {
 
         return try resolve(
             userInfo: userInfo,
+            message: message,
             entities: entities,
             deviceLabelsById: deviceLabelsById
         )
@@ -1139,7 +1167,8 @@ private enum KioskDoorbellStationResolver {
 
     static func resolveLive(
         server: Server,
-        userInfo: [AnyHashable: Any]
+        userInfo: [AnyHashable: Any],
+        message: String? = nil
     ) -> Promise<KioskDoorbellStation> {
         guard let api = Current.api(for: server) else {
             return Promise(error: HomeAssistantAPI.APIError.noAPIAvailable)
@@ -1171,6 +1200,7 @@ private enum KioskDoorbellStationResolver {
 
                 return try resolve(
                     userInfo: userInfo,
+                    message: message,
                     entities: response.entities,
                     deviceLabelsById: deviceLabelsById
                 )
@@ -1180,6 +1210,7 @@ private enum KioskDoorbellStationResolver {
 
     private static func resolve(
         userInfo: [AnyHashable: Any],
+        message: String?,
         entities: [EntityRegistryListForDisplay.Entity],
         deviceLabelsById: [String: Set<String>]
     ) throws -> KioskDoorbellStation {
@@ -1192,7 +1223,7 @@ private enum KioskDoorbellStationResolver {
             return result
         }
 
-        let payload = KioskDoorbellPayload(userInfo: userInfo)
+        let payload = KioskDoorbellPayload(userInfo: userInfo, message: message)
         let requestedStation = payload.stationId.map(normalizedStationId)
 
         let triggerEntry = payload.triggerEntityId.flatMap { triggerEntityId in
