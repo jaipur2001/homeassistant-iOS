@@ -38,10 +38,18 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
     /// Hidden, off-screen volume view; `MPVolumeView` only drives the hardware volume while in a window.
     private lazy var volumeControlView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 1, height: 1))
 
+    private enum KioskAudioPurpose {
+        case general
+        case doorbell
+    }
+
     #if os(iOS) && !targetEnvironment(macCatalyst)
-    /// Persistent native player for kiosk alarm audio.
+    /// Persistent native player used for kiosk MP3 playback.
     private var kioskAudioPlayer: AVAudioPlayer?
     private var kioskAudioFileURL: URL?
+    private var kioskAudioPurpose: KioskAudioPurpose?
+    private var doorbellRingtoneStopWorkItem: DispatchWorkItem?
+    private var doorbellRingtoneRequestID: UUID?
     #endif
 
     override init() {
@@ -157,7 +165,10 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
+
                 let server = cameraServer(from: userInfo, fallback: webViewController.server)
+                let commandArguments = KioskPushCommand.arguments(from: message)
+                let ringtoneMediaContentId = commandArguments.count > 1 ? commandArguments[1] : nil
 
                 KioskDoorbellStationResolver.resolveLive(
                     server: server,
@@ -168,10 +179,11 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     Current.Log.info(
                         "Doorbell station resolved live: \(station.id), camera=\(station.cameraEntityId)"
                     )
-                    KioskDoorbellOverlayPresenter.shared.show(
+                    self.presentDoorbell(
                         station: station,
                         server: server,
-                        on: webViewController
+                        webViewController: webViewController,
+                        ringtoneMediaContentId: ringtoneMediaContentId
                     )
                 }
                 .catch(on: .main) { liveError in
@@ -188,10 +200,11 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                         Current.Log.info(
                             "Doorbell station resolved from local cache: \(station.id)"
                         )
-                        KioskDoorbellOverlayPresenter.shared.show(
+                        self.presentDoorbell(
                             station: station,
                             server: server,
-                            on: webViewController
+                            webViewController: webViewController,
+                            ringtoneMediaContentId: ringtoneMediaContentId
                         )
                     } catch {
                         Current.Log.error(
@@ -208,7 +221,37 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
     }
 
+    private func presentDoorbell(
+        station: KioskDoorbellStation,
+        server: Server,
+        webViewController: WebViewControllerProtocol,
+        ringtoneMediaContentId: String?
+    ) {
+        stopDoorbellRingtone()
+
+        KioskDoorbellOverlayPresenter.shared.show(
+            station: station,
+            server: server,
+            on: webViewController,
+            stopRingtone: { [weak self] in
+                self?.stopDoorbellRingtone()
+            }
+        )
+
+        if let ringtoneMediaContentId,
+           !ringtoneMediaContentId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            playDoorbellRingtone(
+                mediaContentId: ringtoneMediaContentId,
+                server: server
+            )
+        } else {
+            Current.Log.info("Doorbell opened silently: station=\(station.id)")
+        }
+    }
+
     private func hideDoorbell() {
+        stopDoorbellRingtone()
+
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { webViewController in
                 KioskDoorbellOverlayPresenter.shared.hide(on: webViewController)
@@ -321,10 +364,18 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
                         if let requestedVolume {
                             self.setSystemVolume(requestedVolume) { [weak self] in
-                                self?.startKioskAudio(fileURL: localFileURL)
+                                self?.startKioskAudio(
+                                    fileURL: localFileURL,
+                                    purpose: .general,
+                                    loops: 0
+                                )
                             }
                         } else {
-                            self.startKioskAudio(fileURL: localFileURL)
+                            self.startKioskAudio(
+                                fileURL: localFileURL,
+                                purpose: .general,
+                                loops: 0
+                            )
                         }
                     }
                     .catch { error in
@@ -343,10 +394,71 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         #endif
     }
 
-    private func startKioskAudio(fileURL: URL) {
+    private func playDoorbellRingtone(
+        mediaContentId: String,
+        server: Server
+    ) {
         #if os(iOS) && !targetEnvironment(macCatalyst)
+        guard let api = Current.api(for: server) else {
+            Current.Log.error(
+                "Unable to play doorbell ringtone: no API available for server \(server.info.name)"
+            )
+            return
+        }
+
+        let requestID = UUID()
+        doorbellRingtoneRequestID = requestID
+        Current.Log.info("Doorbell ringtone requested: \(mediaContentId)")
+
+        api.downloadMediaSource(mediaContentId, expires: 300)
+            .done(on: .main) { [weak self] localFileURL in
+                guard let self else {
+                    try? FileManager.default.removeItem(at: localFileURL)
+                    return
+                }
+
+                guard self.doorbellRingtoneRequestID == requestID else {
+                    Current.Log.info("Discarding stale doorbell ringtone download")
+                    try? FileManager.default.removeItem(at: localFileURL)
+                    return
+                }
+
+                Current.Log.info(
+                    "Doorbell ringtone downloaded to \(localFileURL.lastPathComponent)"
+                )
+                self.startKioskAudio(
+                    fileURL: localFileURL,
+                    purpose: .doorbell,
+                    loops: -1
+                )
+            }
+            .catch { [weak self] error in
+                guard let self else { return }
+                if self.doorbellRingtoneRequestID == requestID {
+                    self.doorbellRingtoneRequestID = nil
+                }
+                Current.Log.error(
+                    "Unable to resolve/download doorbell ringtone \(mediaContentId): \(error)"
+                )
+            }
+        #endif
+    }
+
+    private func startKioskAudio(
+        fileURL: URL,
+        purpose: KioskAudioPurpose,
+        loops: Int
+    ) {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        doorbellRingtoneStopWorkItem?.cancel()
+        doorbellRingtoneStopWorkItem = nil
+        if purpose != .doorbell {
+            doorbellRingtoneRequestID = nil
+        }
+
         kioskAudioPlayer?.stop()
         kioskAudioPlayer = nil
+        kioskAudioPurpose = nil
 
         if let previousFileURL = kioskAudioFileURL,
            previousFileURL != fileURL {
@@ -380,7 +492,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
 
             let player = try AVAudioPlayer(contentsOf: fileURL)
             player.volume = 1.0
-            player.numberOfLoops = 0
+            player.numberOfLoops = loops
 
             guard player.prepareToPlay() else {
                 throw NSError(
@@ -391,6 +503,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
 
             kioskAudioPlayer = player
+            kioskAudioPurpose = purpose
 
             guard player.play() else {
                 kioskAudioPlayer = nil
@@ -402,11 +515,27 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
 
             Current.Log.info(
-                "Native kiosk audio playback started: \(fileURL.lastPathComponent), duration=\(player.duration)s"
+                "Native kiosk audio playback started: \(fileURL.lastPathComponent), "
+                    + "purpose=\(String(describing: purpose)), duration=\(player.duration)s"
             )
+
+            if purpose == .doorbell {
+                let workItem = DispatchWorkItem { [weak self] in
+                    self?.stopDoorbellRingtone()
+                }
+                doorbellRingtoneStopWorkItem = workItem
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + 30,
+                    execute: workItem
+                )
+            }
         } catch {
             Current.Log.error("Unable to start native kiosk audio: \(error)")
             kioskAudioPlayer = nil
+            kioskAudioPurpose = nil
+            doorbellRingtoneRequestID = nil
+            doorbellRingtoneStopWorkItem?.cancel()
+            doorbellRingtoneStopWorkItem = nil
 
             if let currentFileURL = kioskAudioFileURL {
                 try? FileManager.default.removeItem(at: currentFileURL)
@@ -417,17 +546,39 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         #endif
     }
 
+    private func stopDoorbellRingtone() {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        // Also invalidate a ringtone whose media-source download has not completed yet.
+        doorbellRingtoneRequestID = nil
+
+        guard kioskAudioPurpose == .doorbell else { return }
+        stopNativeKioskAudio(reason: "doorbell ringtone")
+        #endif
+    }
+
     private func stopKioskMedia() {
         #if os(iOS) && !targetEnvironment(macCatalyst)
-        Current.Log.info("Stopping native kiosk audio")
+        stopNativeKioskAudio(reason: "kiosk_stop_media")
+        #else
+        Current.Log.warning("kiosk_stop_media is only supported by the native iOS application")
+        #endif
+    }
+
+    #if os(iOS) && !targetEnvironment(macCatalyst)
+    private func stopNativeKioskAudio(reason: String) {
+        Current.Log.info("Stopping native kiosk audio: \(reason)")
+
+        doorbellRingtoneRequestID = nil
+        doorbellRingtoneStopWorkItem?.cancel()
+        doorbellRingtoneStopWorkItem = nil
 
         kioskAudioPlayer?.stop()
         kioskAudioPlayer = nil
+        kioskAudioPurpose = nil
 
         if let currentFileURL = kioskAudioFileURL {
             try? FileManager.default.removeItem(at: currentFileURL)
         }
-
         kioskAudioFileURL = nil
 
         do {
@@ -438,10 +589,8 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         } catch {
             Current.Log.warning("Unable to deactivate native kiosk audio session: \(error)")
         }
-        #else
-        Current.Log.warning("kiosk_stop_media is only supported by the native iOS application")
-        #endif
     }
+    #endif
 
     func resetPushID() -> Promise<String> {
         firstly {
@@ -1398,13 +1547,19 @@ private final class KioskDoorbellOverlayPresenter {
     func show(
         station: KioskDoorbellStation,
         server: Server,
-        on webViewController: WebViewControllerProtocol
+        on webViewController: WebViewControllerProtocol,
+        stopRingtone: @escaping () -> Void
     ) {
         precondition(Thread.isMainThread)
 
         let present = { [weak self, weak webViewController] in
             guard let self, let webViewController else { return }
-            self.present(station: station, server: server, on: webViewController)
+            self.present(
+                station: station,
+                server: server,
+                on: webViewController,
+                stopRingtone: stopRingtone
+            )
         }
 
         if isTransitioning {
@@ -1478,7 +1633,8 @@ private final class KioskDoorbellOverlayPresenter {
     private func present(
         station: KioskDoorbellStation,
         server: Server,
-        on webViewController: WebViewControllerProtocol
+        on webViewController: WebViewControllerProtocol,
+        stopRingtone: @escaping () -> Void
     ) {
         let controller = KioskDoorbellView(
             station: station,
@@ -1487,6 +1643,7 @@ private final class KioskDoorbellOverlayPresenter {
                 guard let self, let webViewController else { return }
                 self.hide(on: webViewController)
             },
+            stopRingtone: stopRingtone,
             performOpener: { [weak self] opener in
                 self?.perform(opener: opener, server: server)
             }
@@ -1574,6 +1731,7 @@ private struct KioskDoorbellView: View {
     let station: KioskDoorbellStation
     let server: Server
     let dismiss: () -> Void
+    let stopRingtone: () -> Void
     let performOpener: (KioskDoorbellOpener) -> Void
 
     @State private var pendingOpener: KioskDoorbellOpener?
@@ -1685,6 +1843,13 @@ private struct KioskDoorbellView: View {
 
     private func toggleMicrophone() {
         guard station.intercomEntityId != nil else { return }
+
+        if !isMicrophoneEnabled {
+            // Stop ringing before the future intercom audio session changes to
+            // playAndRecord/voiceChat. Never restart ringing when muting again.
+            stopRingtone()
+        }
+
         isMicrophoneEnabled.toggle()
         Current.Log.info(
             "Doorbell microphone toggled: station=\(station.id), enabled=\(isMicrophoneEnabled)"
@@ -1692,6 +1857,8 @@ private struct KioskDoorbellView: View {
     }
 
     private func hangUp() {
+        stopRingtone()
+
         if isMicrophoneEnabled {
             isMicrophoneEnabled = false
             Current.Log.info("Doorbell microphone disabled on hangup: station=\(station.id)")
