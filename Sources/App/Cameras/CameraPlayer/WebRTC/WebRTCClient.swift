@@ -270,24 +270,37 @@ final class PlaybackOnlyRTCAudioDevice: NSObject, RTCAudioDevice {
 final class WebRTCClient: NSObject, WebRTCStreamClient {
     private static let playbackOnlyAudioDevice = PlaybackOnlyRTCAudioDevice()
 
-    // The `RTCPeerConnectionFactory` is in charge of creating new RTCPeerConnection instances.
-    // A new RTCPeerConnection should be created every new call, but the factory is shared.
-    private static let factory: RTCPeerConnectionFactory = {
+    private static let initializeWebRTC: Void = {
         WebRTCFieldTrials.registerBeforeCreatingFactory()
         RTCInitializeSSL()
-        let videoEncoderFactory = RTCDefaultVideoEncoderFactory()
-        let videoDecoderFactory = RTCDefaultVideoDecoderFactory()
+    }()
+
+    /// Default camera playback keeps the proven output-only audio device so opening a camera can
+    /// never activate the microphone. Doorbell/intercom sessions opt into a second factory that
+    /// uses libwebrtc's native full-duplex audio device.
+    private static let playbackOnlyFactory: RTCPeerConnectionFactory = {
+        _ = initializeWebRTC
         return RTCPeerConnectionFactory(
-            encoderFactory: videoEncoderFactory,
-            decoderFactory: videoDecoderFactory,
+            encoderFactory: RTCDefaultVideoEncoderFactory(),
+            decoderFactory: RTCDefaultVideoDecoderFactory(),
             audioDevice: playbackOnlyAudioDevice
+        )
+    }()
+
+    private static let fullDuplexFactory: RTCPeerConnectionFactory = {
+        _ = initializeWebRTC
+        return RTCPeerConnectionFactory(
+            encoderFactory: RTCDefaultVideoEncoderFactory(),
+            decoderFactory: RTCDefaultVideoDecoderFactory()
         )
     }()
 
     weak var delegate: WebRTCClientDelegate?
     private let peerConnection: RTCPeerConnection
+    private let supportsTalkback: Bool
     private var remoteVideoTrack: RTCVideoTrack?
     private var remoteAudioTrack: RTCAudioTrack?
+    private var localAudioTrack: RTCAudioTrack?
     private var localDataChannel: RTCDataChannel?
     private var remoteDataChannel: RTCDataChannel?
     /// The view remote video renders into. Held here because the track that ends up carrying the
@@ -302,7 +315,10 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
         fatalError("WebRTCClient:init is unavailable")
     }
 
-    init(configuration: WebRTCClientConfiguration) {
+    init(
+        configuration: WebRTCClientConfiguration,
+        supportsTalkback: Bool = false
+    ) {
         let config = RTCConfiguration()
         config.iceServers = configuration.iceServers
 
@@ -353,7 +369,8 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
             optionalConstraints: ["DtlsSrtpKeyAgreement": kRTCMediaConstraintsValueTrue]
         )
 
-        guard let peerConnection = WebRTCClient.factory.peerConnection(
+        let factory = supportsTalkback ? WebRTCClient.fullDuplexFactory : WebRTCClient.playbackOnlyFactory
+        guard let peerConnection = factory.peerConnection(
             with: config,
             constraints: constraints,
             delegate: nil
@@ -362,6 +379,7 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
         }
 
         self.peerConnection = peerConnection
+        self.supportsTalkback = supportsTalkback
         super.init()
         createMediaTracks()
         if let dataChannelLabel = configuration.dataChannelLabel {
@@ -372,7 +390,17 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
     }
 
     func closeConnection() {
+        localAudioTrack?.isEnabled = false
         peerConnection.close()
+
+        if supportsTalkback {
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setActive(false, options: .notifyOthersOnDeactivation)
+            } catch {
+                Current.Log.warning("Unable to deactivate WebRTC talkback audio session: \(error)")
+            }
+        }
     }
 
     // MARK: Signaling
@@ -440,6 +468,39 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
         return !remoteAudioTrack.isEnabled
     }
 
+    func setTalkbackEnabled(_ enabled: Bool) -> Bool {
+        guard supportsTalkback, let localAudioTrack else {
+            return false
+        }
+
+        if enabled {
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: .voiceChat,
+                    options: [.defaultToSpeaker, .allowBluetooth]
+                )
+                try session.setPreferredSampleRate(48_000)
+                try session.setPreferredIOBufferDuration(0.01)
+                try session.setActive(true)
+                try session.overrideOutputAudioPort(.speaker)
+            } catch {
+                Current.Log.error("Unable to activate WebRTC talkback audio session: \(error)")
+                localAudioTrack.isEnabled = false
+                return false
+            }
+        }
+
+        localAudioTrack.isEnabled = enabled
+        Current.Log.info("WebRTC talkback track enabled=\(enabled)")
+        return localAudioTrack.isEnabled
+    }
+
+    func isTalkbackEnabled() -> Bool {
+        localAudioTrack?.isEnabled ?? false
+    }
+
     /// Whether the peer connection can still carry media. iOS suspends the app after a short spell
     /// in the background and the connection does not survive that, so the player asks rather than
     /// assumes when it comes back to the foreground.
@@ -449,12 +510,33 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
     }
 
     private func createMediaTracks() {
-        // Receive-only transceivers, matching the frontend player: we never send media, so no
-        // local track or capturer is needed (RTCCameraVideoCapturer is unavailable in app
-        // extensions anyway), and the offer negotiates recvonly m-lines.
-        let audioTransceiverInit = RTCRtpTransceiverInit()
-        audioTransceiverInit.direction = .recvOnly
-        peerConnection.addTransceiver(of: .audio, init: audioTransceiverInit)
+        if supportsTalkback {
+            // Negotiate a send-capable audio m-line from the start so enabling the microphone later
+            // only toggles the local track and never needs a second offer/renegotiation.
+            let audioConstraints = RTCMediaConstraints(
+                mandatoryConstraints: nil,
+                optionalConstraints: [
+                    "googEchoCancellation": kRTCMediaConstraintsValueTrue,
+                    "googAutoGainControl": kRTCMediaConstraintsValueTrue,
+                    "googNoiseSuppression": kRTCMediaConstraintsValueTrue,
+                    "googHighpassFilter": kRTCMediaConstraintsValueTrue,
+                ]
+            )
+            let audioSource = WebRTCClient.fullDuplexFactory.audioSource(with: audioConstraints)
+            let localAudioTrack = WebRTCClient.fullDuplexFactory.audioTrack(
+                with: audioSource,
+                trackId: "doorbell-talkback-audio"
+            )
+            // Privacy first: the negotiated sender exists, but no microphone audio is sent until the
+            // user presses the doorbell microphone button.
+            localAudioTrack.isEnabled = false
+            self.localAudioTrack = localAudioTrack
+            peerConnection.add(localAudioTrack, streamIds: ["doorbell-talkback"])
+        } else {
+            let audioTransceiverInit = RTCRtpTransceiverInit()
+            audioTransceiverInit.direction = .recvOnly
+            peerConnection.addTransceiver(of: .audio, init: audioTransceiverInit)
+        }
 
         let videoTransceiverInit = RTCRtpTransceiverInit()
         videoTransceiverInit.direction = .recvOnly
