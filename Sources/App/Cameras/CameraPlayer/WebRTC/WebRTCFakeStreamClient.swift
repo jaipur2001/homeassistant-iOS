@@ -19,6 +19,7 @@ final class WebRTCFakeStreamClient: WebRTCStreamClient {
     private(set) var rendererCount = 0
     private(set) var isClosed = false
     private var isMuted = true
+    private var talkbackEnabled = false
 
     init(configuration: WebRTCClientConfiguration) {
         self.configuration = configuration
@@ -57,6 +58,15 @@ final class WebRTCFakeStreamClient: WebRTCStreamClient {
 
     func isAudioMuted() -> Bool {
         isMuted
+    }
+
+    func setTalkbackEnabled(_ enabled: Bool) -> Bool {
+        talkbackEnabled = enabled
+        return talkbackEnabled
+    }
+
+    func isTalkbackEnabled() -> Bool {
+        talkbackEnabled
     }
 
     func closeConnection() {
