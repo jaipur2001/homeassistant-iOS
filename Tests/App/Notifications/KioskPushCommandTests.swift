@@ -36,6 +36,15 @@ final class KioskPushCommandTests: XCTestCase {
             KioskPushCommand.argument(from: "kiosk_show_doorbell|binary_sensor.klingel_haustuer"),
             "binary_sensor.klingel_haustuer"
         )
+        XCTAssertEqual(
+            KioskPushCommand.arguments(
+                from: "kiosk_show_doorbell|station_haustuer|media-source://media_source/local/doorbell/doorbell.mp3"
+            ),
+            [
+                "station_haustuer",
+                "media-source://media_source/local/doorbell/doorbell.mp3",
+            ]
+        )
     }
 
     func testUnknownKioskTokenReturnsNil() {
