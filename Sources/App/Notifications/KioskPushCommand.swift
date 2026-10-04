@@ -28,7 +28,24 @@ enum KioskPushCommand: String, CaseIterable {
     }
 
     init?(message: String) {
-        self.init(rawValue: Self.normalized(message))
+        self.init(rawValue: Self.commandToken(from: message))
+    }
+
+    static func argument(from message: String) -> String? {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let separator = trimmed.firstIndex(of: "|") else { return nil }
+
+        let value = trimmed[trimmed.index(after: separator)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return value.isEmpty ? nil : value
+    }
+
+    private static func commandToken(from message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandPart = trimmed.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init) ?? trimmed
+        return commandPart.lowercased()
     }
 
     private static func normalized(_ message: String) -> String {
