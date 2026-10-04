@@ -1577,6 +1577,7 @@ private struct KioskDoorbellView: View {
     let performOpener: (KioskDoorbellOpener) -> Void
 
     @State private var pendingOpener: KioskDoorbellOpener?
+    @State private var isMicrophoneEnabled = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -1597,23 +1598,14 @@ private struct KioskDoorbellView: View {
                     Text(station.name)
                         .font(.title2.bold())
                     Spacer()
-                    Button(action: dismiss) {
+                    Button {
+                        hangUp()
+                    } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.title)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Klingeldialog schließen")
-                }
-
-                if station.intercomEntityId != nil {
-                    HStack(spacing: 8) {
-                        Image(systemName: "mic.slash.fill")
-                        Text("Gegensprechen vorbereitet")
-                        Spacer()
-                        Text("Mikrofon aus")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.subheadline)
                 }
 
                 if !station.openers.isEmpty {
@@ -1630,6 +1622,41 @@ private struct KioskDoorbellView: View {
                             .controlSize(.large)
                         }
                     }
+                }
+
+                HStack(spacing: 16) {
+                    Button {
+                        toggleMicrophone()
+                    } label: {
+                        Label(
+                            isMicrophoneEnabled ? "Mikrofon EIN" : "Mikrofon AUS",
+                            systemImage: isMicrophoneEnabled ? "mic.fill" : "mic.slash.fill"
+                        )
+                        .font(.system(size: 20, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(station.intercomEntityId == nil)
+
+                    Button {
+                        hangUp()
+                    } label: {
+                        Label("Auflegen", systemImage: "phone.down.fill")
+                            .font(.system(size: 20, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.large)
+                }
+
+                if station.intercomEntityId == nil {
+                    Text("Gegensprechen noch nicht konfiguriert")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(20)
@@ -1654,6 +1681,24 @@ private struct KioskDoorbellView: View {
                 pendingOpener = nil
             }
         }
+    }
+
+    private func toggleMicrophone() {
+        guard station.intercomEntityId != nil else { return }
+        isMicrophoneEnabled.toggle()
+        Current.Log.info(
+            "Doorbell microphone toggled: station=\(station.id), enabled=\(isMicrophoneEnabled)"
+        )
+    }
+
+    private func hangUp() {
+        if isMicrophoneEnabled {
+            isMicrophoneEnabled = false
+            Current.Log.info("Doorbell microphone disabled on hangup: station=\(station.id)")
+        }
+
+        Current.Log.info("Doorbell call ended: station=\(station.id)")
+        dismiss()
     }
 }
 
