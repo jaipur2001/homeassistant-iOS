@@ -15,6 +15,7 @@ public enum KioskScreensaverCommand: Equatable {
 public final class KioskModeManager: ObservableObject {
     @Published public private(set) var settings: KioskSettings
     @Published public private(set) var isCameraOverlayVisible = false
+    @Published public private(set) var isDoorbellOverlayVisible = false
     @Published public private(set) var isAlarmOverlayVisible = false
     @Published public private(set) var isScreensaverVisible = false
 
@@ -33,6 +34,10 @@ public final class KioskModeManager: ObservableObject {
 
     public var cameraOverlayVisiblePublisher: AnyPublisher<Bool, Never> {
         $isCameraOverlayVisible.eraseToAnyPublisher()
+    }
+
+    public var doorbellOverlayVisiblePublisher: AnyPublisher<Bool, Never> {
+        $isDoorbellOverlayVisible.eraseToAnyPublisher()
     }
 
     public var alarmOverlayVisiblePublisher: AnyPublisher<Bool, Never> {
@@ -75,6 +80,10 @@ public final class KioskModeManager: ObservableObject {
 
     public func setCameraOverlayVisible(_ visible: Bool) {
         isCameraOverlayVisible = visible
+    }
+
+    public func setDoorbellOverlayVisible(_ visible: Bool) {
+        isDoorbellOverlayVisible = visible
     }
 
     public func setAlarmOverlayVisible(_ visible: Bool) {
