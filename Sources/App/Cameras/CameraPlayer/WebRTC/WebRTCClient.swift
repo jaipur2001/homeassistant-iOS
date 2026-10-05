@@ -474,17 +474,8 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
         }
 
         if enabled {
-            let session = AVAudioSession.sharedInstance()
             do {
-                try session.setCategory(
-                    .playAndRecord,
-                    mode: .voiceChat,
-                    options: [.defaultToSpeaker, .allowBluetooth]
-                )
-                try session.setPreferredSampleRate(48_000)
-                try session.setPreferredIOBufferDuration(0.01)
-                try session.setActive(true)
-                try session.overrideOutputAudioPort(.speaker)
+                try configureTalkbackAudioSession()
             } catch {
                 Current.Log.error("Unable to activate WebRTC talkback audio session: \(error)")
                 localAudioTrack.isEnabled = false
@@ -499,6 +490,78 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
 
     func isTalkbackEnabled() -> Bool {
         localAudioTrack?.isEnabled ?? false
+    }
+
+    /// Configures talkback without pinning audio to a specific accessory brand.
+    ///
+    /// External microphone-capable routes are preferred over the built-in microphone. iOS keeps
+    /// the matching output side of a bidirectional route (USB speakerphone, Bluetooth HFP headset,
+    /// wired headset) together with that input. When no external route exists, defaultToSpeaker
+    /// provides the normal iPad/iPhone loudspeaker fallback.
+    private func configureTalkbackAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+
+        try session.setCategory(
+            .playAndRecord,
+            mode: .voiceChat,
+            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+        )
+
+        let preferredInput = Self.preferredTalkbackInput(from: session.availableInputs ?? [])
+        try session.setPreferredInput(preferredInput)
+        try session.setPreferredSampleRate(48_000)
+        try session.setPreferredIOBufferDuration(0.01)
+        try session.setActive(true)
+
+        Self.logTalkbackAudioRoute(session: session, preferredInput: preferredInput)
+    }
+
+    /// Prefer full-duplex external accessories, but keep unknown future/external input types ahead
+    /// of the built-in microphone as well. No vendor or product names are hard-coded here.
+    private static func preferredTalkbackInput(
+        from inputs: [AVAudioSessionPortDescription]
+    ) -> AVAudioSessionPortDescription? {
+        inputs.min {
+            talkbackInputPriority($0.portType) < talkbackInputPriority($1.portType)
+        }
+    }
+
+    private static func talkbackInputPriority(_ portType: AVAudioSession.Port) -> Int {
+        switch portType {
+        case .usbAudio:
+            return 0
+        case .bluetoothHFP:
+            return 10
+        case .headsetMic:
+            return 20
+        case .lineIn:
+            return 30
+        case .builtInMic:
+            return 100
+        default:
+            // Treat any other input-capable route as external/future hardware and prefer it over
+            // the built-in microphone without making assumptions about a vendor or device name.
+            return 50
+        }
+    }
+
+    private static func logTalkbackAudioRoute(
+        session: AVAudioSession,
+        preferredInput: AVAudioSessionPortDescription?
+    ) {
+        let preferred = preferredInput.map(audioPortDescription) ?? "system default"
+        let inputs = session.currentRoute.inputs.map(audioPortDescription).joined(separator: ", ")
+        let outputs = session.currentRoute.outputs.map(audioPortDescription).joined(separator: ", ")
+
+        Current.Log.info(
+            "WebRTC talkback audio route preferredInput=\(preferred) " +
+                "currentInput=\(inputs.isEmpty ? "none" : inputs) " +
+                "currentOutput=\(outputs.isEmpty ? "none" : outputs)"
+        )
+    }
+
+    private static func audioPortDescription(_ port: AVAudioSessionPortDescription) -> String {
+        "\(port.portName) [\(port.portType.rawValue)]"
     }
 
     /// Whether the peer connection can still carry media. iOS suspends the app after a short spell
