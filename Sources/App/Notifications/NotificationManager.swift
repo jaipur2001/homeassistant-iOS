@@ -74,6 +74,12 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         if Current.settingsStore.clearBadgeAutomatically {
             UIApplication.shared.applicationIconBadgeNumber = 0
         }
+
+        // Kiosk notifications are commands, not an inbox. Remove stale delivered and
+        // pending kiosk pushes whenever the app becomes active so old test commands
+        // can never block or compete with a current dialog.
+        clearStaleKioskNotifications(reason: "app became active")
+
         localPushManager.scheduleAppOpenLocalPushRetries()
         #if os(iOS) && !targetEnvironment(macCatalyst)
         if #available(iOS 17.2, *) {
@@ -84,7 +90,50 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         #endif
     }
 
+    private func clearStaleKioskNotifications(
+        reason: String,
+        excluding identifier: String? = nil
+    ) {
+        let center = UNUserNotificationCenter.current()
+
+        center.getDeliveredNotifications { notifications in
+            let identifiers = KioskPushCommand.notificationIdentifiers(
+                in: notifications.map(\.request),
+                excluding: identifier
+            )
+            guard !identifiers.isEmpty else { return }
+
+            center.removeDeliveredNotifications(withIdentifiers: identifiers)
+            Current.Log.info(
+                "Removed stale delivered kiosk notifications (\(reason)): \(identifiers)"
+            )
+        }
+
+        center.getPendingNotificationRequests { requests in
+            let identifiers = KioskPushCommand.notificationIdentifiers(
+                in: requests,
+                excluding: identifier
+            )
+            guard !identifiers.isEmpty else { return }
+
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+            Current.Log.info(
+                "Removed stale pending kiosk notifications (\(reason)): \(identifiers)"
+            )
+        }
+    }
+
     private func openCamera(from userInfo: [AnyHashable: Any]?) {
+        guard !Current.kiosk.isAlarmOverlayVisible else {
+            Current.Log.info("Ignoring kiosk camera dialog while alarm overlay has priority")
+            return
+        }
+
+        guard !Current.kiosk.isDoorbellOverlayVisible else {
+            Current.Log.info("Ignoring kiosk camera dialog while doorbell overlay has priority")
+            return
+        }
+
         guard let entityId = cameraEntityId(from: userInfo) else {
             Current.Log.error("Received kiosk_show_camera command without a valid camera entity_id")
             return
@@ -162,6 +211,11 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         from userInfo: [AnyHashable: Any],
         message: String
     ) {
+        guard !Current.kiosk.isAlarmOverlayVisible else {
+            Current.Log.info("Ignoring kiosk doorbell dialog while alarm overlay has priority")
+            return
+        }
+
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
@@ -816,9 +870,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         }
 
         if Current.kiosk.settings.acceptRemoteCommands,
-           KioskPushCommand(message: response.notification.request.content.body) == .showCamera,
-           cameraEntityId(from: userInfo) != nil {
-            openCamera(from: userInfo)
+           let kioskCommand = KioskPushCommand(message: response.notification.request.content.body) {
+            clearStaleKioskNotifications(reason: "notification tap \(kioskCommand.rawValue)")
+            performKioskCommand(
+                kioskCommand,
+                userInfo: userInfo,
+                message: response.notification.request.content.body
+            )
             completionHandler()
             return
         }
@@ -951,6 +1009,10 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             return nil
         }
 
+        clearStaleKioskNotifications(
+            reason: "foreground \(command.rawValue)",
+            excluding: request.identifier
+        )
         performKioskCommand(command, userInfo: content.userInfo, message: message)
 
         // The command already ran above; the toast is only its visual confirmation, which the user can
@@ -1023,6 +1085,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 
     private func showKioskAlarm(userInfo: [AnyHashable: Any]) {
+        // Alarm is the highest-priority kiosk dialog. Stop an active doorbell
+        // ringtone and clear lower-priority visibility state before the alarm
+        // presenter replaces whatever is currently on screen.
+        stopDoorbellRingtone()
+        Current.kiosk.setDoorbellOverlayVisible(false)
+        Current.kiosk.setCameraOverlayVisible(false)
+
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { webViewController in
                 let server = self.cameraServer(from: userInfo, fallback: webViewController.server)
@@ -1639,6 +1708,11 @@ private final class KioskDoorbellOverlayPresenter {
     ) {
         precondition(Thread.isMainThread)
 
+        // Mark the doorbell visible before any replacement animation begins so
+        // lower-priority camera commands cannot race in during the transition.
+        Current.kiosk.setDoorbellOverlayVisible(true)
+        Current.kiosk.setCameraOverlayVisible(true)
+
         let present = { [weak self, weak webViewController] in
             guard let self, let webViewController else { return }
             self.present(
@@ -1688,6 +1762,7 @@ private final class KioskDoorbellOverlayPresenter {
 
         controller.modalPresentationStyle = .overFullScreen
         overlayController = controller
+        Current.kiosk.setDoorbellOverlayVisible(true)
         Current.kiosk.setCameraOverlayVisible(true)
 
         if webViewController.overlayedController != nil {
@@ -1705,6 +1780,7 @@ private final class KioskDoorbellOverlayPresenter {
         guard let overlayController,
               webViewController.overlayedController === overlayController else {
             self.overlayController = nil
+            Current.kiosk.setDoorbellOverlayVisible(false)
             Current.kiosk.setCameraOverlayVisible(false)
             return
         }
@@ -1713,6 +1789,7 @@ private final class KioskDoorbellOverlayPresenter {
         webViewController.dismissOverlayController(animated: true) { [weak self] in
             self?.overlayController = nil
             self?.isTransitioning = false
+            Current.kiosk.setDoorbellOverlayVisible(false)
             Current.kiosk.setCameraOverlayVisible(false)
         }
     }
@@ -1739,6 +1816,7 @@ private final class KioskDoorbellOverlayPresenter {
 
         controller.modalPresentationStyle = .overFullScreen
         overlayController = controller
+        Current.kiosk.setDoorbellOverlayVisible(true)
         Current.kiosk.setCameraOverlayVisible(true)
         webViewController.presentOverlayController(controller: controller, animated: true)
 
@@ -2100,6 +2178,9 @@ private final class KioskAlarmOverlayPresenter {
         on webViewController: WebViewControllerProtocol
     ) {
         precondition(Thread.isMainThread)
+
+        // Alarm wins immediately, including during an overlay replacement.
+        Current.kiosk.setAlarmOverlayVisible(true)
 
         let present = { [weak self, weak webViewController] in
             guard let self, let webViewController else { return }
