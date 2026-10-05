@@ -1888,6 +1888,7 @@ private struct KioskDoorbellView: View {
                         .padding(.vertical, 14)
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(isMicrophoneEnabled ? .green : .orange)
                     .controlSize(.large)
                     .disabled(station.intercomEntityId == nil)
 
