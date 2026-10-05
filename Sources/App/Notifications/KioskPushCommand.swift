@@ -2,6 +2,7 @@ import Foundation
 import SFSafeSymbols
 import Shared
 import SwiftUI
+import UserNotifications
 
 enum KioskPushCommand: String, CaseIterable {
     case showScreensaver = "kiosk_show_screensaver"
@@ -25,6 +26,22 @@ enum KioskPushCommand: String, CaseIterable {
 
     static func isKioskCommand(message: String) -> Bool {
         normalized(message).hasPrefix(prefix)
+    }
+
+    /// Returns the notification identifiers that contain kiosk commands.
+    /// Kiosk pushes are control messages, not inbox items, so stale delivered or
+    /// pending requests must never block a newer kiosk dialog.
+    static func notificationIdentifiers(
+        in requests: [UNNotificationRequest],
+        excluding identifier: String? = nil
+    ) -> [String] {
+        requests.compactMap { request in
+            guard request.identifier != identifier,
+                  isKioskCommand(message: request.content.body) else {
+                return nil
+            }
+            return request.identifier
+        }
     }
 
     init?(message: String) {
