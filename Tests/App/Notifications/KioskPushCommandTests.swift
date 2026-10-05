@@ -1,6 +1,7 @@
 @testable import HomeAssistant
 import SFSafeSymbols
 @testable import Shared
+import UserNotifications
 import XCTest
 
 final class KioskPushCommandTests: XCTestCase {
@@ -61,6 +62,31 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertFalse(KioskPushCommand.isKioskCommand(message: "hello"))
     }
 
+    func testNotificationIdentifiersSelectOnlyKioskCommands() {
+        let requests = [
+            notificationRequest(identifier: "doorbell-old", body: "kiosk_show_doorbell|binary_sensor.door"),
+            notificationRequest(identifier: "normal", body: "Motion detected"),
+            notificationRequest(identifier: "alarm-old", body: "kiosk_show_alarm"),
+        ]
+
+        XCTAssertEqual(
+            KioskPushCommand.notificationIdentifiers(in: requests),
+            ["doorbell-old", "alarm-old"]
+        )
+    }
+
+    func testNotificationIdentifiersCanExcludeCurrentRequest() {
+        let requests = [
+            notificationRequest(identifier: "old", body: "kiosk_show_camera"),
+            notificationRequest(identifier: "current", body: "kiosk_show_alarm"),
+        ]
+
+        XCTAssertEqual(
+            KioskPushCommand.notificationIdentifiers(in: requests, excluding: "current"),
+            ["old"]
+        )
+    }
+
     func testRawValuesAreStableTokens() {
         XCTAssertEqual(KioskPushCommand.showScreensaver.rawValue, "kiosk_show_screensaver")
         XCTAssertEqual(KioskPushCommand.hideScreensaver.rawValue, "kiosk_hide_screensaver")
@@ -80,6 +106,12 @@ final class KioskPushCommandTests: XCTestCase {
         for command in KioskPushCommand.allCases {
             XCTAssertFalse(command.symbol.rawValue.isEmpty, "\(command) has no symbol")
         }
+    }
+
+    private func notificationRequest(identifier: String, body: String) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        content.body = body
+        return UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
     }
 
     // MARK: - Confirmation toast
