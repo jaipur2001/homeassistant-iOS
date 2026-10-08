@@ -171,6 +171,27 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         }
     }
 
+    func diagnosticRetryLocalPush() {
+        KioskRestartDiagnostics.shared.markLifecycle("MANUAL LP RETRY")
+        localPushManager.retryLocalPush(for: nil, reason: .manual)
+    }
+
+    func diagnosticWarmAPI() {
+        KioskRestartDiagnostics.shared.markLifecycle("MANUAL API WARM")
+
+        for api in Current.apis {
+            api.Connect(reason: .warm)
+                .done(on: .main) {
+                    KioskRestartDiagnostics.shared.markLifecycle("API WARM completed")
+                }
+                .catch(on: .main) { error in
+                    KioskRestartDiagnostics.shared.markLifecycle(
+                        "API WARM failed: \(error)"
+                    )
+                }
+        }
+    }
+
     @objc private func didBecomeActive() {
         KioskRestartDiagnostics.shared.markLifecycle("didBecomeActive")
 
