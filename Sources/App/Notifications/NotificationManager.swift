@@ -1,5 +1,6 @@
 import AVFoundation
 import CallbackURLKit
+import Combine
 import FirebaseMessaging
 import Foundation
 import HAKit
@@ -13,6 +14,106 @@ import XCGLogger
 #if DEBUG
 private let forceDisableLocalPushForLiveActivityTesting = false
 #endif
+
+final class KioskRestartDiagnostics: ObservableObject {
+    static let shared = KioskRestartDiagnostics()
+
+    @Published private(set) var lifecycle = "-"
+    @Published private(set) var webSocket = "-"
+    @Published private(set) var localPushState = "-"
+    @Published private(set) var localPushEvent = "-"
+    @Published private(set) var willPresent = "-"
+    @Published private(set) var kioskCommand = "-"
+    @Published private(set) var webView = "-"
+    @Published private(set) var overlay = "-"
+
+    private var localPushEventCount = 0
+    private var willPresentCount = 0
+    private var kioskCommandCount = 0
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    private init() {}
+
+    var summary: String {
+        [
+            "LIFE  \(lifecycle)",
+            "WS    \(webSocket)",
+            "LP    \(localPushState)",
+            "EVENT \(localPushEvent)",
+            "WILL  \(willPresent)",
+            "CMD   \(kioskCommand)",
+            "WEB   \(webView)",
+            "OVL   \(overlay)",
+        ].joined(separator: "\n")
+    }
+
+    func markLifecycle(_ value: String) {
+        set(\.lifecycle, value: value)
+    }
+
+    func markWebSocket(_ value: String) {
+        set(\.webSocket, value: value)
+    }
+
+    func markLocalPushState(_ value: String) {
+        set(\.localPushState, value: value)
+    }
+
+    func markLocalPushEvent(_ value: String) {
+        DispatchQueue.main.async {
+            self.localPushEventCount += 1
+            self.localPushEvent = self.stamp("#\(self.localPushEventCount) \(self.compact(value))")
+        }
+    }
+
+    func markWillPresent(_ value: String) {
+        DispatchQueue.main.async {
+            self.willPresentCount += 1
+            self.willPresent = self.stamp("#\(self.willPresentCount) \(self.compact(value))")
+        }
+    }
+
+    func markKioskCommand(_ value: String) {
+        DispatchQueue.main.async {
+            self.kioskCommandCount += 1
+            self.kioskCommand = self.stamp("#\(self.kioskCommandCount) \(self.compact(value))")
+        }
+    }
+
+    func markWebView(_ value: String) {
+        set(\.webView, value: value)
+    }
+
+    func markOverlay(_ value: String) {
+        set(\.overlay, value: value)
+    }
+
+    private func set(
+        _ keyPath: ReferenceWritableKeyPath<KioskRestartDiagnostics, String>,
+        value: String
+    ) {
+        DispatchQueue.main.async {
+            self[keyPath: keyPath] = self.stamp(self.compact(value))
+        }
+    }
+
+    private func stamp(_ value: String) -> String {
+        "\(Self.timeFormatter.string(from: Date())) \(value)"
+    }
+
+    private func compact(_ value: String) -> String {
+        let flattened = value.replacingOccurrences(of: "\n", with: " ")
+        if flattened.count <= 58 {
+            return flattened
+        }
+        return String(flattened.prefix(55)) + "..."
+    }
+}
 
 class NotificationManager: NSObject, LocalPushManagerDelegate {
     lazy var localPushManager: NotificationManagerLocalPushInterface = {
@@ -71,6 +172,8 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
     }
 
     @objc private func didBecomeActive() {
+        KioskRestartDiagnostics.shared.markLifecycle("didBecomeActive")
+
         if Current.settingsStore.clearBadgeAutomatically {
             UIApplication.shared.applicationIconBadgeNumber = 0
         }
@@ -162,10 +265,13 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         from userInfo: [AnyHashable: Any],
         message: String
     ) {
+        KioskRestartDiagnostics.shared.markWebView("doorbell waiting for WebViewController")
+
         Current.sceneManager.webViewControllerPromise
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
 
+                KioskRestartDiagnostics.shared.markWebView("WebViewController resolved")
                 let server = cameraServer(from: userInfo, fallback: webViewController.server)
                 let commandArguments = KioskPushCommand.arguments(from: message)
                 let ringtoneMediaContentId = commandArguments.count > 1 ? commandArguments[1] : nil
@@ -217,6 +323,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     }
                 }
             }.catch { error in
+                KioskRestartDiagnostics.shared.markWebView("WebViewController FAILED: \(error)")
                 Current.Log.error("Failed to show dynamic doorbell overlay: \(error)")
             }
     }
@@ -647,7 +754,28 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         _ manager: LocalPushManager,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any]
     ) {
+        KioskRestartDiagnostics.shared.markLocalPushEvent(
+            diagnosticNotificationBody(from: userInfo)
+        )
         handleRemoteNotification(userInfo: userInfo).cauterize()
+    }
+
+    private func diagnosticNotificationBody(from userInfo: [AnyHashable: Any]) -> String {
+        if let aps = userInfo["aps"] as? [String: Any] {
+            if let alert = aps["alert"] as? [String: Any],
+               let body = alert["body"] as? String {
+                return body
+            }
+            if let alert = aps["alert"] as? String {
+                return alert
+            }
+        }
+
+        if let message = userInfo["message"] as? String {
+            return message
+        }
+
+        return "payload received"
     }
 
     private func handleRemoteNotification(userInfo: [AnyHashable: Any]) -> Guarantee<UIBackgroundFetchResult> {
@@ -940,6 +1068,8 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
             return nil
         }
 
+        KioskRestartDiagnostics.shared.markWillPresent(message)
+
         let kioskSettings = Current.kiosk.settings
         guard kioskSettings.acceptRemoteCommands else {
             Current.Log.info("Ignoring kiosk remote command (disabled in settings): \(message)")
@@ -970,6 +1100,8 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         userInfo: [AnyHashable: Any],
         message: String
     ) {
+        KioskRestartDiagnostics.shared.markKioskCommand(command.rawValue)
+
         switch command {
         case .showScreensaver:
             Current.kiosk.requestScreensaver(.show)
@@ -1639,6 +1771,10 @@ private final class KioskDoorbellOverlayPresenter {
     ) {
         precondition(Thread.isMainThread)
 
+        KioskRestartDiagnostics.shared.markOverlay(
+            "show entry transition=\(isTransitioning) existing=\(webViewController.overlayedController != nil)"
+        )
+
         let present = { [weak self, weak webViewController] in
             guard let self, let webViewController else { return }
             self.present(
@@ -1650,11 +1786,13 @@ private final class KioskDoorbellOverlayPresenter {
         }
 
         if isTransitioning {
+            KioskRestartDiagnostics.shared.markOverlay("queued: presenter transitioning")
             pendingShow = present
             return
         }
 
         if webViewController.overlayedController != nil {
+            KioskRestartDiagnostics.shared.markOverlay("replacing existing overlay")
             isTransitioning = true
             pendingShow = present
             webViewController.dismissOverlayController(animated: false) { [weak self] in
@@ -1740,7 +1878,20 @@ private final class KioskDoorbellOverlayPresenter {
         controller.modalPresentationStyle = .overFullScreen
         overlayController = controller
         Current.kiosk.setCameraOverlayVisible(true)
+        KioskRestartDiagnostics.shared.markOverlay("presentOverlayController called")
         webViewController.presentOverlayController(controller: controller, animated: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak controller, weak webViewController] in
+            guard let controller, let webViewController else {
+                KioskRestartDiagnostics.shared.markOverlay("verification lost presenter reference")
+                return
+            }
+
+            let visible = webViewController.overlayedController === controller
+            KioskRestartDiagnostics.shared.markOverlay(
+                visible ? "VISIBLE: controller attached" : "NOT VISIBLE: controller not attached"
+            )
+        }
 
         Current.Log.info(
             "Doorbell overlay shown: station=\(station.id), camera=\(station.cameraEntityId), "
