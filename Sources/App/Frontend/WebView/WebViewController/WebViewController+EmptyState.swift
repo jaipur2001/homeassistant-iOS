@@ -35,7 +35,12 @@ extension WebViewController {
         // missing or refused certificate fails the same way every time until the user imports one.
         if connectionState == .disconnected || connectionState == .unknown, clientCertificateIssue == nil {
             reconnectManager?.start { [weak self] in
-                self?.recoverDisconnectedFrontend()
+                guard let self else { return }
+
+                Current.Log.info(
+                    "Kiosk auto-recovery: clearing frontend cache and restarting disconnected frontend"
+                )
+                self.retryClearingFrontendCache()
             }
         } else {
             reconnectManager?.stop()
