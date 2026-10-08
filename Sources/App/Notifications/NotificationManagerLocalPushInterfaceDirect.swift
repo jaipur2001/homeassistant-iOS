@@ -216,15 +216,15 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
 
         let timeoutWorkItem = DispatchWorkItem { [weak self] in
             guard let self,
-                  pingGenerations[key] == generation else {
+                  self.pingGenerations[key] == generation else {
                 return
             }
 
-            pingGenerations.removeValue(forKey: key)
-            pingTimeoutWorkItems.removeValue(forKey: key)
-            pingTokens.removeValue(forKey: key)?.cancel()
+            self.pingGenerations.removeValue(forKey: key)
+            self.pingTimeoutWorkItems.removeValue(forKey: key)
+            self.pingTokens.removeValue(forKey: key)?.cancel()
 
-            hardReconnect(
+            self.hardReconnect(
                 server: server,
                 connection: connection,
                 reason: "WebSocket ping timed out after \(ConnectionWatchdog.pingTimeout)s"
@@ -241,13 +241,13 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         let token = connection.send(request) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self,
-                      pingGenerations[key] == generation else {
+                      self.pingGenerations[key] == generation else {
                     return
                 }
 
-                pingGenerations.removeValue(forKey: key)
-                pingTimeoutWorkItems.removeValue(forKey: key)?.cancel()
-                pingTokens.removeValue(forKey: key)
+                self.pingGenerations.removeValue(forKey: key)
+                self.pingTimeoutWorkItems.removeValue(forKey: key)?.cancel()
+                self.pingTokens.removeValue(forKey: key)
 
                 switch result {
                 case .success:
@@ -255,7 +255,7 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
                         "Kiosk connection watchdog: WebSocket ping OK for \(server.info.name)"
                     )
                 case let .failure(error):
-                    hardReconnect(
+                    self.hardReconnect(
                         server: server,
                         connection: connection,
                         reason: "WebSocket ping failed: \(error)"
