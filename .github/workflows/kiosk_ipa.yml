@@ -11,6 +11,7 @@ on:
     branches:
       - kiosk-main
       - feature/dynamic-doorbell
+      - fix/build56-kiosk-recovery-v2
     paths:
       - ".github/kiosk-build-trigger"
 
