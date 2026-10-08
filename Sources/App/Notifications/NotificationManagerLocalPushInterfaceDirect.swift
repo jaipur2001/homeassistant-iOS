@@ -1,6 +1,8 @@
 import Foundation
 import HAKit
+import PromiseKit
 import Shared
+import UIKit
 
 class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushInterface {
     func status(for server: Server) -> NotificationManagerLocalPushStatus {
@@ -8,6 +10,10 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     }
 
     private var localPushManagers: PerServerContainer<LocalPushManager>!
+    private var connectionStateObserver: NSObjectProtocol?
+    private var serversSeenReady = Set<String>()
+    private var serversNeedingWarmRecovery = Set<String>()
+    private var warmRecoveryInFlight = Set<String>()
     weak var localPushDelegate: LocalPushManagerDelegate?
 
     init(delegate: LocalPushManagerDelegate) {
@@ -29,11 +35,25 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
             }
         }
 
+        connectionStateObserver = NotificationCenter.default.addObserver(
+            forName: HAConnectionState.didTransitionToStateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.connectionStateDidChange(notification)
+        }
+
         // PerServerContainer is eager by default, so all configured servers
         // already have a LocalPushManager here. Retry after startup in case
         // the manager was created before the API/WebSocket became available.
         DispatchQueue.main.async { [weak self] in
             self?.retryAllSubscriptions()
+        }
+    }
+
+    deinit {
+        if let connectionStateObserver {
+            NotificationCenter.default.removeObserver(connectionStateObserver)
         }
     }
 
@@ -63,6 +83,79 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     private func retryAllSubscriptions() {
         for server in Current.servers.all {
             localPushManagers[server].retrySubscription()
+        }
+    }
+
+    private func connectionStateDidChange(_ notification: Notification) {
+        guard let changedConnection = notification.object as? HAConnection else {
+            return
+        }
+
+        for server in Current.servers.all {
+            guard let api = Current.api(for: server),
+                  (api.connection as AnyObject) === (changedConnection as AnyObject) else {
+                continue
+            }
+
+            let key = server.identifier.rawValue
+
+            switch api.connection.state {
+            case .ready:
+                let hadPreviouslyBeenReady = serversSeenReady.contains(key)
+                serversSeenReady.insert(key)
+
+                guard hadPreviouslyBeenReady,
+                      serversNeedingWarmRecovery.remove(key) != nil,
+                      UIApplication.shared.applicationState == .active,
+                      !warmRecoveryInFlight.contains(key) else {
+                    return
+                }
+
+                warmRecoveryInFlight.insert(key)
+
+                Current.Log.warning(
+                    "Kiosk HA recovery: WebSocket reconnected for \(server.info.name); " +
+                        "running the same warm API reconciliation as app foreground"
+                )
+
+                api.Connect(reason: .warm)
+                    .done(on: .main) { [weak self] in
+                        guard let self else { return }
+
+                        Current.Log.info(
+                            "Kiosk HA recovery: warm API reconciliation completed for \(server.info.name); " +
+                                "forcing local-push resubscribe"
+                        )
+                        self.localPushManagers[server].retrySubscription()
+                    }
+                    .catch(on: .main) { [weak self] error in
+                        guard let self else { return }
+
+                        Current.Log.error(
+                            "Kiosk HA recovery: warm API reconciliation failed for \(server.info.name): \(error); " +
+                                "forcing local-push resubscribe anyway"
+                        )
+                        self.localPushManagers[server].retrySubscription()
+                    }
+                    .finally { [weak self] in
+                        DispatchQueue.main.async {
+                            self?.warmRecoveryInFlight.remove(key)
+                        }
+                    }
+
+            case .disconnected:
+                if serversSeenReady.contains(key) {
+                    serversNeedingWarmRecovery.insert(key)
+                    Current.Log.info(
+                        "Kiosk HA recovery: detected disconnect after established session for \(server.info.name)"
+                    )
+                }
+
+            case .connecting, .authenticating:
+                break
+            }
+
+            return
         }
     }
 
