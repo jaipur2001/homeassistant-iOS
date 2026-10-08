@@ -11,6 +11,7 @@ on:
     branches:
       - kiosk-main
       - feature/dynamic-doorbell
+      - fix/build56-localpush-subscription-retry
     paths:
       - ".github/kiosk-build-trigger"
 
