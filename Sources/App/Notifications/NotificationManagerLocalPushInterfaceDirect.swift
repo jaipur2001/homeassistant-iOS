@@ -194,28 +194,30 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
 
     private func recoverFrontendIfNeeded(for server: Server) {
         Current.sceneManager.webViewControllerPromise
-            .done(on: .main) { webViewController in
-                guard webViewController.server.identifier == server.identifier else {
-                    Current.Log.info(
-                        "Kiosk startup recovery: active frontend belongs to another server; " +
-                            "skipping cache recovery"
-                    )
-                    return
-                }
+            .done { webViewController in
+                Task { @MainActor in
+                    guard webViewController.server.identifier == server.identifier else {
+                        Current.Log.info(
+                            "Kiosk startup recovery: active frontend belongs to another server; " +
+                                "skipping cache recovery"
+                        )
+                        return
+                    }
 
-                guard webViewController.overlayState?.emptyState != nil else {
-                    Current.Log.info(
-                        "Kiosk startup recovery: frontend is not in empty state; " +
-                            "no cache reset required"
-                    )
-                    return
-                }
+                    guard webViewController.overlayState?.emptyState != nil else {
+                        Current.Log.info(
+                            "Kiosk startup recovery: frontend is not in empty state; " +
+                                "no cache reset required"
+                        )
+                        return
+                    }
 
-                Current.Log.warning(
-                    "Kiosk startup recovery: frontend is still in empty state after HA startup; " +
-                        "automatically running 'clear cache and restart'"
-                )
-                webViewController.retryClearingFrontendCache()
+                    Current.Log.warning(
+                        "Kiosk startup recovery: frontend is still in empty state after HA startup; " +
+                            "automatically running 'clear cache and restart'"
+                    )
+                    webViewController.retryClearingFrontendCache()
+                }
             }
             .catch { error in
                 Current.Log.error(
