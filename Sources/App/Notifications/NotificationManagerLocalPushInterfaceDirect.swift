@@ -8,6 +8,7 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     }
 
     private var localPushManagers: PerServerContainer<LocalPushManager>!
+    private var connectionStateObserver: NSObjectProtocol?
     weak var localPushDelegate: LocalPushManagerDelegate?
 
     init(delegate: LocalPushManagerDelegate) {
@@ -32,8 +33,22 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         // PerServerContainer is eager by default, so all configured servers
         // already have a LocalPushManager here. Retry after startup in case
         // the manager was created before the API/WebSocket became available.
+        connectionStateObserver = NotificationCenter.default.addObserver(
+            forName: HAConnectionState.didTransitionToStateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.connectionStateDidChange(notification)
+        }
+
         DispatchQueue.main.async { [weak self] in
             self?.retryAllSubscriptions()
+        }
+    }
+
+    deinit {
+        if let connectionStateObserver {
+            NotificationCenter.default.removeObserver(connectionStateObserver)
         }
     }
 
@@ -62,6 +77,23 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
 
     private func retryAllSubscriptions() {
         for server in Current.servers.all {
+            localPushManagers[server].retrySubscription()
+        }
+    }
+
+    private func connectionStateDidChange(_ notification: Notification) {
+        guard let changedConnection = notification.object as? HAConnection else { return }
+
+        for server in Current.servers.all {
+            guard let connection = Current.api(for: server)?.connection,
+                  (connection as AnyObject) === (changedConnection as AnyObject),
+                  case .ready = connection.state else {
+                continue
+            }
+
+            Current.Log.info(
+                "Kiosk local push: Home Assistant WebSocket ready; forcing local-push resubscribe for \(server.info.name)"
+            )
             localPushManagers[server].retrySubscription()
         }
     }
