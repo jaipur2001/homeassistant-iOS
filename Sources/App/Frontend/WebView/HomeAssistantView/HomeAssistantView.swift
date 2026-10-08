@@ -74,11 +74,28 @@ struct HomeAssistantView: View, WebFrontendView {
             }
             .animation(reduceMotion ? nil : DesignSystem.Animation.easeInOutFaster, value: nativeSidebar.isVisible)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("KIOSK RESTART DIAG")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
+
                 Text(kioskRestartDiagnostics.summary)
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .allowsHitTesting(false)
+
+                HStack(spacing: 6) {
+                    Button("LP RETRY") {
+                        AppDelegate.shared?.notificationManager.diagnosticRetryLocalPush()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
+                    Button("API WARM") {
+                        AppDelegate.shared?.notificationManager.diagnosticWarmAPI()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
             }
             .foregroundStyle(.green)
             .padding(7)
@@ -87,7 +104,6 @@ struct HomeAssistantView: View, WebFrontendView {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.top, 48)
             .padding(.leading, 8)
-            .allowsHitTesting(false)
             .zIndex(10_000)
         }
         .onChange(of: nativeSidebar.isEnabled) { _ in
