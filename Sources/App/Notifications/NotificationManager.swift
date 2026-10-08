@@ -650,6 +650,62 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
         handleRemoteNotification(userInfo: userInfo).cauterize()
     }
 
+    func localPushManager(
+        _ manager: LocalPushManager,
+        shouldHandleDirectly content: UNNotificationContent,
+        identifier: String
+    ) -> Bool {
+        guard UIApplication.shared.applicationState == .active else {
+            return false
+        }
+
+        let message = content.body
+        guard KioskPushCommand.isKioskCommand(message: message) else {
+            return false
+        }
+
+        let kioskSettings = Current.kiosk.settings
+        guard kioskSettings.acceptRemoteCommands else {
+            Current.Log.info(
+                "Ignoring direct local-push kiosk command (disabled in settings): \(message)"
+            )
+            return false
+        }
+
+        guard let command = KioskPushCommand(message: message) else {
+            Current.Log.warning(
+                "Direct local-push kiosk command could not be parsed: \(message)"
+            )
+            return false
+        }
+
+        Current.Log.info(
+            "Executing kiosk command directly from local push: \(command.rawValue), id=\(identifier)"
+        )
+
+        let execute = { [weak self] in
+            guard let self else { return }
+            self.performKioskCommand(
+                command,
+                userInfo: content.userInfo,
+                message: message
+            )
+
+            if #available(iOS 18, *),
+               let toast = command.confirmationToast(id: identifier, settings: kioskSettings) {
+                ToastPresenter.shared.show(toast: toast, duration: 4)
+            }
+        }
+
+        if Thread.isMainThread {
+            execute()
+        } else {
+            DispatchQueue.main.async(execute: execute)
+        }
+
+        return true
+    }
+
     private func handleRemoteNotification(userInfo: [AnyHashable: Any]) -> Guarantee<UIBackgroundFetchResult> {
         Current.Log.verbose("remote notification: \(userInfo)")
 
