@@ -8,6 +8,7 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     }
 
     private var localPushManagers: PerServerContainer<LocalPushManager>!
+    private var connectionStateObserver: NSObjectProtocol?
     weak var localPushDelegate: LocalPushManagerDelegate?
 
     init(delegate: LocalPushManagerDelegate) {
@@ -15,6 +16,9 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         self.localPushManagers = .init { [weak self] server in
             let manager = LocalPushManager(server: server)
             manager.delegate = self?.localPushDelegate
+            KioskRestartDiagnostics.shared.markLocalPushState(
+                "\(server.info.name): created / \(manager.state)"
+            )
             let token = NotificationCenter.default.addObserver(
                 forName: LocalPushManager.stateDidChange,
                 object: manager,
@@ -29,11 +33,33 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
             }
         }
 
+        connectionStateObserver = NotificationCenter.default.addObserver(
+            forName: HAConnectionState.didTransitionToStateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.connectionStateDidChange(notification)
+        }
+
+        for server in Current.servers.all {
+            if let connection = Current.api(for: server)?.connection {
+                KioskRestartDiagnostics.shared.markWebSocket(
+                    "\(server.info.name): initial \(connection.state)"
+                )
+            }
+        }
+
         // PerServerContainer is eager by default, so all configured servers
         // already have a LocalPushManager here. Retry after startup in case
         // the manager was created before the API/WebSocket became available.
         DispatchQueue.main.async { [weak self] in
             self?.retryAllSubscriptions()
+        }
+    }
+
+    deinit {
+        if let connectionStateObserver {
+            NotificationCenter.default.removeObserver(connectionStateObserver)
         }
     }
 
@@ -66,6 +92,24 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         }
     }
 
+    private func connectionStateDidChange(_ notification: Notification) {
+        guard let changedConnection = notification.object as? HAConnection else {
+            return
+        }
+
+        for server in Current.servers.all {
+            guard let connection = Current.api(for: server)?.connection,
+                  (connection as AnyObject) === (changedConnection as AnyObject) else {
+                continue
+            }
+
+            KioskRestartDiagnostics.shared.markWebSocket(
+                "\(server.info.name): \(connection.state)"
+            )
+            return
+        }
+    }
+
     private struct Observer: Equatable {
         let identifier: UUID
         let server: Server
@@ -79,6 +123,10 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     private var observers = [Observer]()
 
     private func pushManagerStateDidChange(server: Server) {
+        KioskRestartDiagnostics.shared.markLocalPushState(
+            "\(server.info.name): \(localPushManagers[server].state)"
+        )
+
         for observer in observers where observer.server == server {
             observer.handler(status(for: server))
         }
