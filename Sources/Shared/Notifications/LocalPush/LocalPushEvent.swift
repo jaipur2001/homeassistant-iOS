@@ -18,7 +18,9 @@ extension HATypedSubscription {
 
         return HATypedSubscription<LocalPushEvent>(request: .init(
             type: "mobile_app/push_notification_channel",
-            data: data
+            data: data,
+            shouldRetry: true,
+            retryDuration: nil
         ))
     }
 }
