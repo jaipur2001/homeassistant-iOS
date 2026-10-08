@@ -1,3 +1,4 @@
+import Foundation
 import HAKit
 import HAKit_PromiseKit
 import PromiseKit
@@ -84,6 +85,13 @@ public class LocalPushManager {
 
     private var tokens = [HACancellable]()
 
+    private enum SubscriptionRetry {
+        static let delays: [TimeInterval] = [2, 5, 10, 15, 30, 60]
+    }
+
+    private var subscriptionRetryWorkItem: DispatchWorkItem?
+    private var subscriptionRetryAttempt = 0
+
     public init(
         server: Server,
         notificationCommunicationDecorator: NotificationCommunicationDecorator =
@@ -102,6 +110,7 @@ public class LocalPushManager {
     /// the webhook ID itself has not changed. This covers kiosk startup/reconnect
     /// where the manager may be created before the API connection is ready.
     public func retrySubscription() {
+        cancelSubscriptionRetry(resetAttempt: true)
         updateSubscription(force: true)
     }
 
@@ -111,6 +120,8 @@ public class LocalPushManager {
     }
 
     public func invalidate() {
+        cancelSubscriptionRetry(resetAttempt: true)
+
         if let subscription {
             Current.Log.info("cancelling")
             subscription.cancel()
@@ -139,6 +150,11 @@ public class LocalPushManager {
     private var subscription: SubscriptionInstance?
 
     private func updateSubscription(force: Bool = false) {
+        if force {
+            subscriptionRetryWorkItem?.cancel()
+            subscriptionRetryWorkItem = nil
+        }
+
         let webhookID = server.info.connection.webhookID
 
         guard force || webhookID != subscription?.webhookID else {
@@ -150,6 +166,7 @@ public class LocalPushManager {
         guard let connection = Current.api(for: server)?.connection else {
             Current.Log.error("No API available to update subscription")
             state = .unavailable
+            scheduleSubscriptionRetry(reason: "API unavailable")
             return
         }
 
@@ -172,9 +189,48 @@ public class LocalPushManager {
         case let .failure(error):
             Current.Log.error("failed to subscribe to notifications: \(error)")
             state = .unavailable
+            scheduleSubscriptionRetry(reason: "subscription failed: \(error)")
         case .success:
             Current.Log.info("started")
+            cancelSubscriptionRetry(resetAttempt: true)
             state = .available(received: 0)
+        }
+    }
+
+    private func scheduleSubscriptionRetry(reason: String) {
+        guard subscriptionRetryWorkItem == nil else {
+            return
+        }
+
+        let delayIndex = min(subscriptionRetryAttempt, SubscriptionRetry.delays.count - 1)
+        let delay = SubscriptionRetry.delays[delayIndex]
+        subscriptionRetryAttempt += 1
+
+        Current.Log.warning(
+            "local push unavailable; retrying subscription in \(Int(delay))s " +
+                "(attempt \(subscriptionRetryAttempt), reason: \(reason))"
+        )
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+
+            self.subscriptionRetryWorkItem = nil
+            Current.Log.info(
+                "retrying local-push subscription for \(self.server.info.name)"
+            )
+            self.updateSubscription(force: true)
+        }
+
+        subscriptionRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func cancelSubscriptionRetry(resetAttempt: Bool) {
+        subscriptionRetryWorkItem?.cancel()
+        subscriptionRetryWorkItem = nil
+
+        if resetAttempt {
+            subscriptionRetryAttempt = 0
         }
     }
 
