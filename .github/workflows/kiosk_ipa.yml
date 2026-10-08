@@ -11,6 +11,7 @@ on:
     branches:
       - kiosk-main
       - feature/dynamic-doorbell
+      - fix/build56-ha-connection-watchdog
     paths:
       - ".github/kiosk-build-trigger"
 
