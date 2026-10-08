@@ -97,6 +97,7 @@ class LifecycleManager {
     }
 
     @objc private func willEnterForeground() {
+        KioskRestartDiagnostics.shared.markLifecycle("willEnterForeground")
         isActive = true
         Task { @MainActor in
             WyomingServerController.shared.applicationWillEnterForeground()
@@ -117,6 +118,7 @@ class LifecycleManager {
     }
 
     @objc private func didEnterBackground() {
+        KioskRestartDiagnostics.shared.markLifecycle("didEnterBackground")
         isActive = false
         Task { @MainActor in
             WyomingServerController.shared.applicationDidEnterBackground()
@@ -140,6 +142,10 @@ class LifecycleManager {
     private var hasTriggeredWarm = false
 
     @objc private func warmConnect() {
+        KioskRestartDiagnostics.shared.markLifecycle(
+            hasTriggeredWarm ? "warmConnect -> Connect(.warm)" : "warmConnect initial ignored"
+        )
+
         if hasTriggeredWarm {
             // iOS 13+ scene API triggers foreground on initial launch, too, so we ignore it
             periodicUpdateManager.connectAPI(reason: .warm)
@@ -148,6 +154,8 @@ class LifecycleManager {
     }
 
     @objc private func didBecomeActive() {
+        KioskRestartDiagnostics.shared.markLifecycle("LifecycleManager didBecomeActive")
+
         // Camera streaming must not depend solely on CameraStreamSensor being
         // instantiated by a sensor update. On a Single App Mode cold boot there may
         // be no immediate sensor refresh, leaving the listener/capture pipeline idle
