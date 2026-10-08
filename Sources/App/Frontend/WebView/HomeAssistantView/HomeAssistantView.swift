@@ -14,6 +14,7 @@ struct HomeAssistantView: View, WebFrontendView {
     @StateObject private var launchMessages = LaunchMessagesState()
     @ObservedObject private var nativeSidebar = MacNativeSidebarState.shared
     @ObservedObject private var nativeTabBar = NativeTabBarState.shared
+    @ObservedObject private var kioskRestartDiagnostics = KioskRestartDiagnostics.shared
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Owned by `ConditionalContainerView`, which presents the picker the stand-by view zooms into.
@@ -72,6 +73,22 @@ struct HomeAssistantView: View, WebFrontendView {
                 frontendContent
             }
             .animation(reduceMotion ? nil : DesignSystem.Animation.easeInOutFaster, value: nativeSidebar.isVisible)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("KIOSK RESTART DIAG")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                Text(kioskRestartDiagnostics.summary)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+            }
+            .foregroundStyle(.green)
+            .padding(7)
+            .background(.black.opacity(0.82))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.top, 48)
+            .padding(.leading, 8)
+            .allowsHitTesting(false)
+            .zIndex(10_000)
         }
         .onChange(of: nativeSidebar.isEnabled) { _ in
             // The frontend reads the `hasSidebar` external config once per page load, so a fresh web
