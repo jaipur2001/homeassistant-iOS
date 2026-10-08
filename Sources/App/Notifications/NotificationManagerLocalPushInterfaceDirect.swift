@@ -4,7 +4,8 @@ import Shared
 
 class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushInterface {
     private enum Recovery {
-        static let delays: [TimeInterval] = [1, 3, 7, 15, 30, 60]
+        static let localPushDelays: [TimeInterval] = [1, 3, 7, 15, 30, 60]
+        static let frontendDelays: [TimeInterval] = [5, 15, 30, 60]
     }
 
     func status(for server: Server) -> NotificationManagerLocalPushStatus {
@@ -19,6 +20,7 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     private var recoveryAttempts = [String: Int]()
     private var recoveryWorkItems = [String: DispatchWorkItem]()
     private var recoveryAttemptInFlight = Set<String>()
+    private var frontendRecoveryWorkItems = [String: [DispatchWorkItem]]()
 
     weak var localPushDelegate: LocalPushManagerDelegate?
 
@@ -63,6 +65,9 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         }
 
         recoveryWorkItems.values.forEach { $0.cancel() }
+        frontendRecoveryWorkItems.values
+            .flatMap { $0 }
+            .forEach { $0.cancel() }
     }
 
     func addObserver(
@@ -122,6 +127,7 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
                         "starting forced local-push resubscribe backoff"
                 )
                 startRecovery(for: server)
+                startFrontendRecovery(for: server)
 
             case .disconnected:
                 if serversSeenReady.contains(key) {
@@ -150,7 +156,7 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
     private func scheduleNextRecoveryAttempt(for server: Server) {
         let key = server.identifier.rawValue
         let attempt = recoveryAttempts[key] ?? 0
-        let delay = Recovery.delays[min(attempt, Recovery.delays.count - 1)]
+        let delay = Recovery.localPushDelays[min(attempt, Recovery.localPushDelays.count - 1)]
 
         recoveryWorkItems[key]?.cancel()
 
@@ -202,6 +208,79 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
         recoveryWorkItems.removeValue(forKey: key)?.cancel()
         recoveryAttempts.removeValue(forKey: key)
         recoveryAttemptInFlight.remove(key)
+    }
+
+    private func startFrontendRecovery(for server: Server) {
+        let key = server.identifier.rawValue
+
+        cancelFrontendRecovery(forKey: key)
+
+        guard Current.kioskSettings.enabled else {
+            Current.Log.info(
+                "Kiosk frontend recovery: kiosk mode disabled; no automatic cache recovery"
+            )
+            return
+        }
+
+        Current.Log.warning(
+            "Kiosk frontend recovery: scheduling automatic clear-cache checks for \(server.info.name)"
+        )
+
+        var workItems = [DispatchWorkItem]()
+
+        for (index, delay) in Recovery.frontendDelays.enumerated() {
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+
+                guard Current.kioskSettings.enabled else {
+                    self.cancelFrontendRecovery(forKey: key)
+                    return
+                }
+
+                Current.sceneManager.webViewControllerPromise
+                    .done { webViewController in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+
+                            guard webViewController.server.identifier == server.identifier else {
+                                Current.Log.info(
+                                    "Kiosk frontend recovery: active frontend belongs to another server"
+                                )
+                                return
+                            }
+
+                            guard webViewController.overlayState?.emptyState != nil else {
+                                Current.Log.info(
+                                    "Kiosk frontend recovery: dashboard recovered; cancelling remaining retries"
+                                )
+                                self.cancelFrontendRecovery(forKey: key)
+                                return
+                            }
+
+                            Current.Log.warning(
+                                "Kiosk frontend recovery: empty state still visible; automatically running " +
+                                    "'clear cache and restart' attempt #\(index + 1) after \(Int(delay))s"
+                            )
+                            webViewController.retryClearingFrontendCache()
+                        }
+                    }
+                    .catch { error in
+                        Current.Log.error(
+                            "Kiosk frontend recovery: unable to access current WebViewController: \(error)"
+                        )
+                    }
+            }
+
+            workItems.append(workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
+
+        frontendRecoveryWorkItems[key] = workItems
+    }
+
+    private func cancelFrontendRecovery(forKey key: String) {
+        frontendRecoveryWorkItems.removeValue(forKey: key)?
+            .forEach { $0.cancel() }
     }
 
     private struct Observer: Equatable {
