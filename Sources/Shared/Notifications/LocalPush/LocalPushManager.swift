@@ -8,6 +8,22 @@ public protocol LocalPushManagerDelegate: AnyObject {
         _ manager: LocalPushManager,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any]
     )
+
+    func localPushManager(
+        _ manager: LocalPushManager,
+        shouldHandleDirectly content: UNNotificationContent,
+        identifier: String
+    ) -> Bool
+}
+
+public extension LocalPushManagerDelegate {
+    func localPushManager(
+        _ manager: LocalPushManager,
+        shouldHandleDirectly content: UNNotificationContent,
+        identifier: String
+    ) -> Bool {
+        false
+    }
 }
 
 public class LocalPushManager {
@@ -224,6 +240,18 @@ public class LocalPushManager {
 
         if Self.isCommand(userInfo) {
             Current.Log.info("local push: handled as command, suppressing banner")
+            confirmReceipt().cauterize()
+            return
+        }
+
+        if delegate?.localPushManager(
+            self,
+            shouldHandleDirectly: baseContent,
+            identifier: event.identifier
+        ) == true {
+            Current.Log.info(
+                "local push: handled directly by app delegate, suppressing UNUserNotificationCenter delivery"
+            )
             confirmReceipt().cauterize()
             return
         }
