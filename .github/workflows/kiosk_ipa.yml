@@ -11,6 +11,7 @@ on:
     branches:
       - kiosk-main
       - feature/dynamic-doorbell
+      - diag/build56-ha-restart-path
     paths:
       - ".github/kiosk-build-trigger"
 
