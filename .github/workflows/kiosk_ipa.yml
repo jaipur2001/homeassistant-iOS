@@ -12,6 +12,7 @@ on:
       - kiosk-main
       - feature/dynamic-doorbell
       - fix/build56-kiosk-recovery-v2
+      - fix/build69-frontend-recovery-v3
     paths:
       - ".github/kiosk-build-trigger"
 
