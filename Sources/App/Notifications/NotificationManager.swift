@@ -683,8 +683,9 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             "Executing kiosk command directly from local push: \(command.rawValue), id=\(identifier)"
         )
 
-        let execute = { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
+
             self.performKioskCommand(
                 command,
                 userInfo: content.userInfo,
@@ -695,12 +696,6 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                let toast = command.confirmationToast(id: identifier, settings: kioskSettings) {
                 ToastPresenter.shared.show(toast: toast, duration: 4)
             }
-        }
-
-        if Thread.isMainThread {
-            execute()
-        } else {
-            DispatchQueue.main.async(execute: execute)
         }
 
         return true
