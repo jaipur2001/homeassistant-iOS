@@ -11,6 +11,7 @@ on:
     branches:
       - kiosk-main
       - feature/dynamic-doorbell
+      - fix/build56-persistent-localpush
     paths:
       - ".github/kiosk-build-trigger"
 
