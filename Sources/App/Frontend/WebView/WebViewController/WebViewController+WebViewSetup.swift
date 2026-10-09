@@ -24,22 +24,138 @@ extension WebViewController {
         )
         userContentController.addUserScript(ClipboardWriteMessageHandler.userScript)
 
-        // Managed kiosk logout guard.
+        // Managed kiosk frontend policy.
         //
-        // Home Assistant's profile page does not navigate when the user taps
-        // "Log out"; it emits a bubbling "hass-logout" DOM event instead.
-        // Install the guard at document start so logout is blocked even before
-        // the frontend or the external message bus has finished initializing.
+        // The Home Assistant user item is rendered by <ha-sidebar> as
+        // #sidebar-profile with href="/profile". Profile navigation is client-side
+        // (History API), so WKNavigationDelegate alone cannot reliably block it.
+        //
+        // Install a document-start policy that:
+        // - blocks the hass-logout event;
+        // - disables the sidebar profile item visually and functionally;
+        // - blocks click/keyboard activation of /profile;
+        // - blocks SPA navigation to protected HA routes through history.pushState/
+        //   replaceState.
+        //
+        // Native revokeExternalAuth protection remains the final token-revocation
+        // backstop even if the frontend implementation changes.
         let managedKioskEnabled = Current.kioskSettings.enabled ? "true" : "false"
-        let logoutGuardSource = """
+        let managedKioskPolicySource = """
         (function() {
+            window.__haManagedKioskPolicyEnabled = \(managedKioskEnabled);
             window.__haManagedKioskLogoutBlocked = \(managedKioskEnabled);
 
-            if (window.__haManagedKioskLogoutGuardInstalled === true) {
+            if (window.__haManagedKioskPolicyInstalled === true) {
+                if (typeof window.__haManagedKioskApplyProfileLock === 'function') {
+                    window.__haManagedKioskApplyProfileLock();
+                }
                 return;
             }
 
-            window.__haManagedKioskLogoutGuardInstalled = true;
+            window.__haManagedKioskPolicyInstalled = true;
+
+            const restrictedPrefixes = [
+                '/profile',
+                '/config',
+                '/developer-tools'
+            ];
+
+            const isRestrictedPath = function(value) {
+                try {
+                    const url = new URL(value || window.location.href, window.location.href);
+                    return restrictedPrefixes.some(function(prefix) {
+                        return url.pathname === prefix || url.pathname.startsWith(prefix + '/');
+                    });
+                } catch (_) {
+                    return false;
+                }
+            };
+
+            const profileTargetInEvent = function(event) {
+                const path = typeof event.composedPath === 'function'
+                    ? event.composedPath()
+                    : [];
+
+                return path.some(function(node) {
+                    if (!(node instanceof Element)) {
+                        return false;
+                    }
+
+                    if (node.id === 'sidebar-profile') {
+                        return true;
+                    }
+
+                    const href = node.getAttribute && node.getAttribute('href');
+                    if (!href) {
+                        return false;
+                    }
+
+                    try {
+                        const url = new URL(href, window.location.href);
+                        return url.pathname === '/profile' || url.pathname.startsWith('/profile/');
+                    } catch (_) {
+                        return false;
+                    }
+                });
+            };
+
+            const observedRoots = new WeakSet();
+
+            const applyProfileLock = function(root) {
+                if (!root || typeof root.querySelectorAll !== 'function') {
+                    return;
+                }
+
+                const enabled = window.__haManagedKioskPolicyEnabled === true;
+                const profileItems = root.querySelectorAll('#sidebar-profile');
+
+                profileItems.forEach(function(item) {
+                    if (enabled) {
+                        item.setAttribute('aria-disabled', 'true');
+                        item.setAttribute('data-managed-kiosk-locked', 'true');
+                        item.style.pointerEvents = 'none';
+                        item.style.opacity = '0.45';
+                        item.title = 'Im Kiosk-Modus gesperrt';
+                    } else if (item.getAttribute('data-managed-kiosk-locked') === 'true') {
+                        item.removeAttribute('aria-disabled');
+                        item.removeAttribute('data-managed-kiosk-locked');
+                        item.style.removeProperty('pointer-events');
+                        item.style.removeProperty('opacity');
+                        if (item.title === 'Im Kiosk-Modus gesperrt') {
+                            item.removeAttribute('title');
+                        }
+                    }
+                });
+
+                root.querySelectorAll('*').forEach(function(element) {
+                    if (element.shadowRoot) {
+                        observeRoot(element.shadowRoot);
+                    }
+                });
+            };
+
+            const observeRoot = function(root) {
+                if (!root || observedRoots.has(root)) {
+                    return;
+                }
+
+                observedRoots.add(root);
+
+                const observer = new MutationObserver(function() {
+                    applyProfileLock(root);
+                });
+
+                observer.observe(root, {
+                    childList: true,
+                    subtree: true
+                });
+
+                applyProfileLock(root);
+            };
+
+            window.__haManagedKioskApplyProfileLock = function() {
+                applyProfileLock(document);
+            };
 
             window.addEventListener('hass-logout', function(event) {
                 if (window.__haManagedKioskLogoutBlocked !== true) {
@@ -50,11 +166,59 @@ extension WebViewController {
                 event.stopImmediatePropagation();
                 console.warn('Managed kiosk policy: Home Assistant logout blocked');
             }, true);
+
+            window.addEventListener('click', function(event) {
+                if (window.__haManagedKioskPolicyEnabled !== true) {
+                    return;
+                }
+
+                if (!profileTargetInEvent(event)) {
+                    return;
+                }
+
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                console.warn('Managed kiosk policy: user profile activation blocked');
+            }, true);
+
+            const originalPushState = history.pushState;
+            history.pushState = function(state, title, url) {
+                if (window.__haManagedKioskPolicyEnabled === true &&
+                    url != null &&
+                    isRestrictedPath(url)) {
+                    console.warn('Managed kiosk policy: blocked SPA navigation to ' + url);
+                    return;
+                }
+
+                return originalPushState.apply(this, arguments);
+            };
+
+            const originalReplaceState = history.replaceState;
+            history.replaceState = function(state, title, url) {
+                if (window.__haManagedKioskPolicyEnabled === true &&
+                    url != null &&
+                    isRestrictedPath(url)) {
+                    console.warn('Managed kiosk policy: blocked SPA navigation to ' + url);
+                    return;
+                }
+
+                return originalReplaceState.apply(this, arguments);
+            };
+
+            observeRoot(document);
+
+            if (document.documentElement) {
+                applyProfileLock(document);
+            } else {
+                document.addEventListener('DOMContentLoaded', function() {
+                    applyProfileLock(document);
+                }, { once: true });
+            }
         })();
         """
 
         userContentController.addUserScript(WKUserScript(
-            source: logoutGuardSource,
+            source: managedKioskPolicySource,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
