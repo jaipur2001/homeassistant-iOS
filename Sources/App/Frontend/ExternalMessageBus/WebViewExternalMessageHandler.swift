@@ -72,7 +72,13 @@ final class WebViewExternalMessageHandler: @preconcurrency WebViewExternalMessag
                     }
                 }
             case .configScreenShow:
-                showSettingsViewController()
+                if Current.kioskSettings.enabled {
+                    Current.Log.warning(
+                        "Managed kiosk policy: blocking regular app settings request from frontend"
+                    )
+                } else {
+                    showSettingsViewController()
+                }
             case .haptic:
                 guard let hapticType = incomingMessage.Payload?["hapticType"] as? String else {
                     Current.Log.error("Received haptic via bus but hapticType was not string! \(incomingMessage)")
