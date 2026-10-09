@@ -13,6 +13,18 @@ public enum KioskScreensaverCommand: Equatable {
 /// `ValueObservation`, so any change persisted by the settings UI is reflected here
 /// (and in `Current.kioskSettings`) without manual refreshes.
 public final class KioskModeManager: ObservableObject {
+    public static let mandatorySensorIds: [WebhookSensorId] = [
+        .kioskMode,
+        .kioskBrightness,
+        .kioskVolume,
+        .kioskScreensaver,
+        .cameraStream,
+    ]
+
+    public static func isMandatorySensor(uniqueID: String) -> Bool {
+        mandatorySensorIds.contains { $0.rawValue == uniqueID }
+    }
+
     @Published public private(set) var settings: KioskSettings
     @Published public private(set) var isCameraOverlayVisible = false
     @Published public private(set) var isAlarmOverlayVisible = false
@@ -110,24 +122,57 @@ public final class KioskModeManager: ObservableObject {
                 let settings = settings ?? KioskSettings()
                 Current.Log.info("Kiosk settings changed, enabled: \(settings.enabled)")
                 self?.settings = settings
+                self?.enforceAuthenticationRequirement(with: settings)
                 self?.syncKioskSensorsEnabled(with: settings)
             }
         )
     }
 
-    /// Turns the kiosk brightness, volume and screensaver sensors on or off alongside kiosk mode,
-    /// but only when kiosk mode actually transitions. The observation also fires with its initial
-    /// value on every manager creation (each app launch, and once per process that touches
-    /// `Current.kiosk`); syncing on those deliveries would silently revert a user's explicit choice
-    /// in Settings → Sensors, which is how sensors kept deactivating without user input (#5261,
-    /// #5306).
+    /// Managed kiosk policy:
+    /// - while kiosk mode is active, critical sensors are always enabled;
+    /// - disabling kiosk keeps the historical behaviour for the kiosk-only
+    ///   brightness/volume/screensaver sensors;
+    /// - authentication is enforced separately below.
     private func syncKioskSensorsEnabled(with settings: KioskSettings) {
-        guard settings.enabled != lastSyncedKioskEnabled else { return }
+        let didTransition = settings.enabled != lastSyncedKioskEnabled
         lastSyncedKioskEnabled = settings.enabled
 
+        if settings.enabled {
+            for sensorId in Self.mandatorySensorIds {
+                guard !Current.sensors.isEnabled(uniqueID: sensorId.rawValue) else { continue }
+                Current.Log.warning(
+                    "Managed kiosk policy: enabling mandatory sensor \(sensorId.rawValue)"
+                )
+                Current.sensors.setEnabled(true, forUniqueID: sensorId.rawValue)
+            }
+            return
+        }
+
+        guard didTransition else { return }
+
         for sensorId in [WebhookSensorId.kioskBrightness, .kioskVolume, .kioskScreensaver] {
-            guard Current.sensors.isEnabled(uniqueID: sensorId.rawValue) != settings.enabled else { continue }
-            Current.sensors.setEnabled(settings.enabled, forUniqueID: sensorId.rawValue)
+            guard Current.sensors.isEnabled(uniqueID: sensorId.rawValue) else { continue }
+            Current.sensors.setEnabled(false, forUniqueID: sensorId.rawValue)
         }
     }
+
+    /// An enabled kiosk must never be left with an unprotected configuration
+    /// entry point. Persist the hardened setting so every settings surface sees
+    /// the same policy after the next database observation.
+    private func enforceAuthenticationRequirement(with settings: KioskSettings) {
+        guard settings.enabled, !settings.requireAuthentication else { return }
+
+        do {
+            try Current.database().write { db in
+                var hardened = try KioskSettings.fetchOne(db) ?? settings
+                guard hardened.enabled, !hardened.requireAuthentication else { return }
+                hardened.requireAuthentication = true
+                try hardened.insert(db, onConflict: .replace)
+            }
+            Current.Log.warning("Managed kiosk policy: administrator authentication enforced")
+        } catch {
+            Current.Log.error("Managed kiosk policy: failed to enforce authentication: \(error)")
+        }
+    }
+
 }
