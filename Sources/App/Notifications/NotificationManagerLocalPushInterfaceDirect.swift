@@ -127,7 +127,9 @@ class NotificationManagerLocalPushInterfaceDirect: NotificationManagerLocalPushI
                         "starting forced local-push resubscribe backoff"
                 )
                 startRecovery(for: server)
-                startFrontendRecovery(for: server)
+                // MainScreen recovery is owned by HomeAssistantViewModel.
+                // Keeping it out of the local-push lifecycle avoids stale
+                // WebViewController references and duplicate cache rebuilds.
 
             case .disconnected:
                 if serversSeenReady.contains(key) {
