@@ -457,7 +457,7 @@ extension WebViewController {
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] enabled in
-                self?.updateManagedKioskLogoutGuard(enabled: enabled)
+                self?.updateManagedKioskFrontendPolicy(enabled: enabled)
             }
             .store(in: &kioskCancellables)
 
@@ -509,15 +509,23 @@ extension WebViewController {
             command: .kioskModeSet,
             payload: ["enable": enable]
         )
-        updateManagedKioskLogoutGuard(enabled: Current.kioskSettings.enabled)
+        updateManagedKioskFrontendPolicy(enabled: Current.kioskSettings.enabled)
     }
 
-    private func updateManagedKioskLogoutGuard(enabled: Bool) {
-        let script = "window.__haManagedKioskLogoutBlocked = \(enabled ? "true" : "false");"
+    private func updateManagedKioskFrontendPolicy(enabled: Bool) {
+        let javascriptEnabled = enabled ? "true" : "false"
+        let script = """
+        window.__haManagedKioskPolicyEnabled = \(javascriptEnabled);
+        window.__haManagedKioskLogoutBlocked = \(javascriptEnabled);
+        if (typeof window.__haManagedKioskApplyProfileLock === 'function') {
+            window.__haManagedKioskApplyProfileLock();
+        }
+        """
+
         webView.evaluateJavaScript(script) { _, error in
             if let error {
                 Current.Log.warning(
-                    "Managed kiosk policy: failed to update logout guard: \(error)"
+                    "Managed kiosk policy: failed to update frontend policy: \(error)"
                 )
             }
         }
