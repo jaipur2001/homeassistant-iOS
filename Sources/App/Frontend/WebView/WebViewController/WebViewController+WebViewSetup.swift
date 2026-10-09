@@ -24,6 +24,41 @@ extension WebViewController {
         )
         userContentController.addUserScript(ClipboardWriteMessageHandler.userScript)
 
+        // Managed kiosk logout guard.
+        //
+        // Home Assistant's profile page does not navigate when the user taps
+        // "Log out"; it emits a bubbling "hass-logout" DOM event instead.
+        // Install the guard at document start so logout is blocked even before
+        // the frontend or the external message bus has finished initializing.
+        let managedKioskEnabled = Current.kioskSettings.enabled ? "true" : "false"
+        let logoutGuardSource = """
+        (function() {
+            window.__haManagedKioskLogoutBlocked = \(managedKioskEnabled);
+
+            if (window.__haManagedKioskLogoutGuardInstalled === true) {
+                return;
+            }
+
+            window.__haManagedKioskLogoutGuardInstalled = true;
+
+            window.addEventListener('hass-logout', function(event) {
+                if (window.__haManagedKioskLogoutBlocked !== true) {
+                    return;
+                }
+
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                console.warn('Managed kiosk policy: Home Assistant logout blocked');
+            }, true);
+        })();
+        """
+
+        userContentController.addUserScript(WKUserScript(
+            source: logoutGuardSource,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
         return userContentController
     }
 
