@@ -46,6 +46,7 @@ struct KioskSensorsView: View {
                 }
             }
         }
+        .disabled(viewModel.isMandatory(sensor))
     }
 }
 
