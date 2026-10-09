@@ -713,6 +713,16 @@ public final class CameraRTSPServer {
         client.connection.cancel()
 
         Current.Log.info("Camera RTSP: client disconnected (\(clients.count) left)")
+
+        if clients.isEmpty {
+            // A new go2rtc/HA consumer should never inherit encoder state from
+            // a connection that vanished during a restart. Re-bootstrap SPS/PPS
+            // and the VideoToolbox session from the next captured frame.
+            sps = nil
+            pps = nil
+            resetEncoder()
+            Current.Log.info("Camera RTSP: last client gone; encoder reset for clean reconnect")
+        }
     }
 
     private func receive(on client: Client) {
