@@ -1,1 +1,1 @@
-trigger: build75-disable-ha-user-profile-in-kiosk
+trigger: build76-explicit-kiosk-unlock
