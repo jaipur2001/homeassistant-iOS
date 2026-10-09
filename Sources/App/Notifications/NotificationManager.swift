@@ -1256,7 +1256,10 @@ private struct KioskDoorbellStation {
     let cameraEntityId: String
     let cameraName: String?
     let triggerEntityId: String?
-    let intercomEntityId: String?
+    /// Camera WebRTC entity that carries the bidirectional intercom session.
+    /// function_intercom is a station capability marker; audio is negotiated on
+    /// the same camera stream that supplies the doorbell video.
+    let intercomTargetEntityId: String?
     let timeoutEntityId: String?
     let openers: [KioskDoorbellOpener]
 }
@@ -1442,10 +1445,23 @@ private enum KioskDoorbellStationResolver {
             .sorted { $0.entityId < $1.entityId }
             .first
 
-        let intercom = stationEntities
+        let intercomMarker = stationEntities
             .filter { labels(for: $0).contains(functionIntercom) }
             .sorted { $0.entityId < $1.entityId }
             .first
+
+        // Home Assistant negotiates bidirectional media on a camera WebRTC
+        // session. function_intercom therefore marks this station as talkback
+        // capable, while the actual WebRTC target is the station's
+        // function_camera entity. This matches door01: the same go2rtc stream
+        // carries video/remote audio and exposes the G.722 speaker backchannel.
+        let intercomTargetEntityId = intercomMarker.map { _ in camera.entityId }
+
+        if let intercomMarker, intercomMarker.entityId != camera.entityId {
+            Current.Log.info(
+                "Doorbell intercom marker \(intercomMarker.entityId) routed to camera WebRTC target \(camera.entityId)"
+            )
+        }
 
         let stationTimeout = stationEntities
             .filter {
@@ -1513,7 +1529,7 @@ private enum KioskDoorbellStationResolver {
             cameraEntityId: camera.entityId,
             cameraName: camera.name,
             triggerEntityId: payload.triggerEntityId ?? doorbell?.entityId,
-            intercomEntityId: intercom?.entityId,
+            intercomTargetEntityId: intercomTargetEntityId,
             timeoutEntityId: timeoutEntity?.entityId,
             openers: openers
         )
@@ -1744,6 +1760,7 @@ private final class KioskDoorbellOverlayPresenter {
 
         Current.Log.info(
             "Doorbell overlay shown: station=\(station.id), camera=\(station.cameraEntityId), "
+                + "intercomTarget=\(station.intercomTargetEntityId ?? "none"), "
                 + "openers=\(station.openers.map(\.entityId))"
         )
     }
@@ -1837,7 +1854,7 @@ private struct KioskDoorbellView: View {
                 cameraName: station.cameraName,
                 allowsCameraSelection: false,
                 showsCloseButton: false,
-                supportsTalkback: station.intercomEntityId != nil,
+                supportsTalkback: station.intercomTargetEntityId != nil,
                 talkbackRequested: $isMicrophoneEnabled,
                 showsWebRTCTalkbackControls: false
             )
@@ -1890,7 +1907,7 @@ private struct KioskDoorbellView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(isMicrophoneEnabled ? .green : .orange)
                     .controlSize(.large)
-                    .disabled(station.intercomEntityId == nil)
+                    .disabled(station.intercomTargetEntityId == nil)
 
                     Button {
                         hangUp()
@@ -1905,7 +1922,7 @@ private struct KioskDoorbellView: View {
                     .controlSize(.large)
                 }
 
-                if station.intercomEntityId == nil {
+                if station.intercomTargetEntityId == nil {
                     Text("Gegensprechen noch nicht konfiguriert")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -1950,7 +1967,7 @@ private struct KioskDoorbellView: View {
     }
 
     private func toggleMicrophone() {
-        guard station.intercomEntityId != nil else { return }
+        guard let intercomTargetEntityId = station.intercomTargetEntityId else { return }
 
         if !isMicrophoneEnabled {
             // Stop ringing before the intercom audio session changes to playAndRecord/voiceChat.
@@ -1960,7 +1977,8 @@ private struct KioskDoorbellView: View {
 
         isMicrophoneEnabled.toggle()
         Current.Log.info(
-            "Doorbell microphone toggled: station=\(station.id), enabled=\(isMicrophoneEnabled)"
+            "Doorbell microphone toggled: station=\(station.id), "
+                + "target=\(intercomTargetEntityId), enabled=\(isMicrophoneEnabled)"
         )
     }
 
