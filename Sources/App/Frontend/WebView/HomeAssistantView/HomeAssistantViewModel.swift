@@ -20,6 +20,13 @@ final class HomeAssistantViewModel: ObservableObject {
         /// empty-state grace period (`SettingsStore.webViewEmptyStateTimeout`, five seconds by default), so a
         /// genuine disconnection still gets to surface as the empty state rather than as a bare web view.
         static let loaderWatchdogTimeout: Duration = .seconds(10)
+        static let kioskRecoveryDelays: [Duration] = [
+            .seconds(3),
+            .seconds(8),
+            .seconds(15),
+            .seconds(30),
+            .seconds(60),
+        ]
         /// Upper bound for the pull distance; the observer shortens it on viewports too short to reach it
         /// in a single swipe, such as iPhone landscape.
         static let pullToRefreshMaximumThreshold: CGFloat = 148
@@ -57,6 +64,8 @@ final class HomeAssistantViewModel: ObservableObject {
     private var loaderCycleID = UUID()
     private var loaderMinimumDurationTask: Task<Void, Never>?
     private var loaderWatchdogTask: Task<Void, Never>?
+    private var kioskRecoveryTask: Task<Void, Never>?
+    private var kioskCacheRecoveryInFlight = false
 
     // The frontend fires `frontend/loaded` exactly once per page load (it swaps out its `update` method after
     // firing), so reconnects within a living page only report `connected`. Once we've seen `loaded`, `connected`
@@ -124,6 +133,7 @@ final class HomeAssistantViewModel: ObservableObject {
     deinit {
         loaderMinimumDurationTask?.cancel()
         loaderWatchdogTask?.cancel()
+        kioskRecoveryTask?.cancel()
     }
 
     var webViewIgnoredSafeAreaEdges: Edge.Set {
@@ -280,6 +290,7 @@ final class HomeAssistantViewModel: ObservableObject {
         overlayState.$emptyState
             .sink { [weak self] emptyState in
                 self?.updateFullScreenLoaderVisibility(hasEmptyState: emptyState != nil)
+                self?.handleKioskEmptyStateChange(emptyState)
             }
             .store(in: &cancellables)
     }
@@ -288,7 +299,127 @@ final class HomeAssistantViewModel: ObservableObject {
         if connectionState == .loaded {
             frontendLoadedOnce = true
         }
+
+        if connectionState.isReadyForDisplay || connectionState == .authInvalid {
+            stopKioskRecovery()
+        }
+
         updateFullScreenLoaderVisibility(connectionState: connectionState)
+    }
+
+    private func handleKioskEmptyStateChange(
+        _ emptyState: WebFrontendOverlayState.EmptyStateContent?
+    ) {
+        guard Current.kioskSettings.enabled, let emptyState else { return }
+
+        switch emptyState.style {
+        case .disconnected, .inFlight:
+            startKioskRecoveryIfNeeded()
+        case .unauthenticated, .loggedOut, .recoveredServerNeedingReauthentication,
+             .clientCertificateRequired, .clientCertificateRejected:
+            stopKioskRecovery()
+        }
+    }
+
+    private func startKioskRecoveryIfNeeded() {
+        guard kioskRecoveryTask == nil else { return }
+
+        Current.Log.warning(
+            "Kiosk frontend recovery owner: starting persistent MainScreen recovery"
+        )
+
+        kioskRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            var attempt = 0
+
+            while !Task.isCancelled {
+                let delay = Constants.kioskRecoveryDelays[
+                    min(attempt, Constants.kioskRecoveryDelays.count - 1)
+                ]
+
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    break
+                }
+
+                guard !Task.isCancelled else { break }
+                guard Current.kioskSettings.enabled else {
+                    stopKioskRecovery()
+                    break
+                }
+
+                if overlayState.connectionState.isReadyForDisplay {
+                    Current.Log.info(
+                        "Kiosk frontend recovery owner: dashboard connected; stopping recovery"
+                    )
+                    stopKioskRecovery()
+                    break
+                }
+
+                if overlayState.connectionState == .authInvalid {
+                    stopKioskRecovery()
+                    break
+                }
+
+                guard !overlayState.isLoading else {
+                    Current.Log.info(
+                        "Kiosk frontend recovery owner: frontend currently loading; deferring retry"
+                    )
+                    attempt += 1
+                    continue
+                }
+
+                guard let emptyState = overlayState.emptyState else {
+                    attempt += 1
+                    continue
+                }
+
+                switch emptyState.style {
+                case .disconnected, .inFlight:
+                    performKioskCacheRecovery(attempt: attempt + 1)
+                case .unauthenticated, .loggedOut, .recoveredServerNeedingReauthentication,
+                     .clientCertificateRequired, .clientCertificateRejected:
+                    stopKioskRecovery()
+                    return
+                }
+
+                attempt += 1
+            }
+        }
+    }
+
+    private func stopKioskRecovery() {
+        kioskRecoveryTask?.cancel()
+        kioskRecoveryTask = nil
+        kioskCacheRecoveryInFlight = false
+    }
+
+    private func performKioskCacheRecovery(attempt: Int) {
+        guard !kioskCacheRecoveryInFlight else { return }
+        kioskCacheRecoveryInFlight = true
+
+        Current.Log.warning(
+            "Kiosk frontend recovery owner: clear-cache rebuild attempt #\(attempt)"
+        )
+
+        Current.websiteDataStoreHandler
+            .cleanCache(dataTypes: WebsiteDataStoreHandlerImpl.frontendAssetDataTypes) { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+
+                    kioskCacheRecoveryInFlight = false
+
+                    guard Current.kioskSettings.enabled,
+                          !overlayState.connectionState.isReadyForDisplay,
+                          overlayState.connectionState != .authInvalid else {
+                        return
+                    }
+
+                    resetWebFrontend()
+                }
+            }
     }
 
     private func beginFullScreenLoaderCycle() {
