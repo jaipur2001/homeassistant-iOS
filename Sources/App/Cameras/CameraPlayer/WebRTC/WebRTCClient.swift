@@ -442,6 +442,19 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
                 Current.Log.error("Failed to set remote description: \(error.localizedDescription)")
             } else {
                 self?.adoptRemoteTracks()
+
+                // A talkback-capable doorbell is full-duplex even while the local microphone track
+                // is still privacy-muted. Route remote playout to an attached full-duplex accessory
+                // immediately instead of waiting for the user to press the microphone button.
+                if self?.supportsTalkback == true {
+                    do {
+                        try self?.configureTalkbackAudioSession()
+                    } catch {
+                        Current.Log.warning(
+                            "Unable to configure initial WebRTC talkback audio route: \(error)"
+                        )
+                    }
+                }
             }
             completion(error)
         }
@@ -487,6 +500,18 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
         }
 
         localAudioTrack.isEnabled = enabled
+
+        if enabled {
+            // Enabling the native WebRTC capture track may cause libwebrtc to reconfigure the
+            // shared AVAudioSession. Re-assert our accessory preference afterwards so USB/HFP
+            // remains the active input/output pair instead of falling back to the iPad.
+            do {
+                try configureTalkbackAudioSession()
+            } catch {
+                Current.Log.warning("Unable to re-assert WebRTC talkback audio route: \(error)")
+            }
+        }
+
         Current.Log.info("WebRTC talkback track enabled=\(enabled)")
         return localAudioTrack.isEnabled
     }
@@ -497,26 +522,58 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
 
     /// Configures talkback without pinning audio to a specific accessory brand.
     ///
-    /// External microphone-capable routes are preferred over the built-in microphone. iOS keeps
-    /// the matching output side of a bidirectional route (USB speakerphone, Bluetooth HFP headset,
-    /// wired headset) together with that input. When no external route exists, defaultToSpeaker
-    /// provides the normal iPad/iPhone loudspeaker fallback.
+    /// The session is activated before selecting the preferred input. This matters for USB audio:
+    /// iOS may not expose the complete set of input-capable routes until a play-and-record session
+    /// is active. An external full-duplex input is then selected explicitly; iOS keeps the matching
+    /// output side of USB/HFP/wired routes together with it. The iPad speaker is used only when no
+    /// external microphone-capable route is available.
     private func configureTalkbackAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
 
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            options: [.allowBluetooth, .allowBluetoothA2DP]
         )
-
-        let preferredInput = Self.preferredTalkbackInput(from: session.availableInputs ?? [])
-        try session.setPreferredInput(preferredInput)
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.01)
+
+        // Activate first. In particular, USB audio devices can become fully enumerable only after
+        // the play-and-record session is live.
         try session.setActive(true)
 
-        Self.logTalkbackAudioRoute(session: session, preferredInput: preferredInput)
+        let availableInputs = session.availableInputs ?? []
+        let preferredInput = Self.preferredTalkbackInput(from: availableInputs)
+        try session.setPreferredInput(preferredInput)
+
+        if let preferredInput, Self.isExternalTalkbackInput(preferredInput.portType) {
+            // Clear any earlier speaker override. For bidirectional accessories iOS then keeps the
+            // accessory's output paired with its selected microphone input.
+            try session.overrideOutputAudioPort(.none)
+        } else {
+            // No external full-duplex accessory is available: make the iPad/iPhone loudspeaker the
+            // explicit fallback instead of globally forcing it via .defaultToSpeaker.
+            try session.overrideOutputAudioPort(.speaker)
+        }
+
+        Self.logTalkbackAudioRoute(
+            session: session,
+            preferredInput: preferredInput,
+            availableInputs: availableInputs
+        )
+    }
+
+    private static func isExternalTalkbackInput(_ portType: AVAudioSession.Port) -> Bool {
+        switch portType {
+        case .usbAudio, .bluetoothHFP, .headsetMic, .lineIn:
+            return true
+        case .builtInMic:
+            return false
+        default:
+            // Unknown input-capable ports are treated as external so future accessories do not get
+            // displaced by the built-in speaker route.
+            return true
+        }
     }
 
     /// Prefer full-duplex external accessories, but keep unknown future/external input types ahead
@@ -550,14 +607,17 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
 
     private static func logTalkbackAudioRoute(
         session: AVAudioSession,
-        preferredInput: AVAudioSessionPortDescription?
+        preferredInput: AVAudioSessionPortDescription?,
+        availableInputs: [AVAudioSessionPortDescription]
     ) {
         let preferred = preferredInput.map(audioPortDescription) ?? "system default"
+        let available = availableInputs.map(audioPortDescription).joined(separator: ", ")
         let inputs = session.currentRoute.inputs.map(audioPortDescription).joined(separator: ", ")
         let outputs = session.currentRoute.outputs.map(audioPortDescription).joined(separator: ", ")
 
         Current.Log.info(
-            "WebRTC talkback audio route preferredInput=\(preferred) " +
+            "WebRTC talkback audio route available=[\(available.isEmpty ? "none" : available)] " +
+                "preferredInput=\(preferred) " +
                 "currentInput=\(inputs.isEmpty ? "none" : inputs) " +
                 "currentOutput=\(outputs.isEmpty ? "none" : outputs)"
         )
