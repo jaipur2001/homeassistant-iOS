@@ -598,11 +598,11 @@ public final class CameraRTSPServer {
     }
 
     public var debugPlayingClientCount: Int {
-        queue.sync { clients.values.filter(\.playing).count }
+        queue.sync { clients.values.filter { $0.playing }.count }
     }
 
     public var debugSendingClientCount: Int {
-        queue.sync { clients.values.filter(\.sendInFlight).count }
+        queue.sync { clients.values.filter { $0.sendInFlight }.count }
     }
 
     public var debugStalledSendDisconnects: Int {
