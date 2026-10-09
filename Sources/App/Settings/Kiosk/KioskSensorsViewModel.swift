@@ -29,10 +29,26 @@ final class KioskSensorsViewModel: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool, for sensor: WebhookSensor) {
+        if !enabled,
+           Current.kioskSettings.enabled,
+           let uniqueID = sensor.UniqueID,
+           KioskModeManager.isMandatorySensor(uniqueID: uniqueID) {
+            Current.Log.warning(
+                "Managed kiosk policy: refusing kiosk UI request to disable mandatory sensor \(uniqueID)"
+            )
+            objectWillChange.send()
+            return
+        }
+
         Current.sensors.setEnabled(enabled, for: sensor)
         // Reflect the change immediately; the sensor refresh triggered by the settings change
         // will follow up with fresh state values.
         objectWillChange.send()
+    }
+
+    func isMandatory(_ sensor: WebhookSensor) -> Bool {
+        guard let uniqueID = sensor.UniqueID else { return false }
+        return Current.kioskSettings.enabled && KioskModeManager.isMandatorySensor(uniqueID: uniqueID)
     }
 
     func refresh() {
