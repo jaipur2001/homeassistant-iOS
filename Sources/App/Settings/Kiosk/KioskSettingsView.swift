@@ -19,6 +19,7 @@ struct KioskSettingsView: View {
                 Toggle(isOn: $viewModel.settings.requireAuthentication) {
                     KioskRow.label(L10n.Kiosk.Authentication.title, icon: .fingerprintIcon)
                 }
+                .disabled(viewModel.settings.enabled)
             } footer: {
                 Text(L10n.Kiosk.Authentication.footer)
             }
