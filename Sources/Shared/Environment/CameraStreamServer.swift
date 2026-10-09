@@ -530,6 +530,7 @@ public final class CameraRTSPServer {
         var sequence = UInt16.random(in: UInt16.min ... UInt16.max)
         let ssrc = UInt32.random(in: UInt32.min ... UInt32.max)
         var sendInFlight = false
+        var sendGeneration: UInt64 = 0
 
         init(connection: NWConnection) {
             self.connection = connection
@@ -542,6 +543,7 @@ public final class CameraRTSPServer {
     private var listener: NWListener?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var active = false
+    private var stalledSendDisconnects = 0
 
     // Encoder-owned state. Only touched on encoderQueue unless noted otherwise.
     private var compressionSession: VTCompressionSession?
@@ -557,6 +559,10 @@ public final class CameraRTSPServer {
     private static let payloadType: UInt8 = 96
     private static let rtpClockRate: Int32 = 90_000
     private static let maxRTPPayload = 1_200
+    private static let rtpSendTimeout: TimeInterval = 5
+    private static let tcpKeepaliveIdle = 10
+    private static let tcpKeepaliveInterval = 5
+    private static let tcpKeepaliveCount = 3
 
     public init() {}
 
@@ -591,6 +597,18 @@ public final class CameraRTSPServer {
         queue.sync { listener != nil }
     }
 
+    public var debugPlayingClientCount: Int {
+        queue.sync { clients.values.filter(\.playing).count }
+    }
+
+    public var debugSendingClientCount: Int {
+        queue.sync { clients.values.filter(\.sendInFlight).count }
+    }
+
+    public var debugStalledSendDisconnects: Int {
+        queue.sync { stalledSendDisconnects }
+    }
+
     public var debugEncoderRunning: Bool {
         encoderQueue.sync { compressionSession != nil }
     }
@@ -623,7 +641,15 @@ public final class CameraRTSPServer {
         guard let nwPort = NWEndpoint.Port(rawValue: portValue) else { return }
 
         do {
-            let newListener = try NWListener(using: .tcp, on: nwPort)
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.noDelay = true
+            tcpOptions.enableKeepalive = true
+            tcpOptions.keepaliveIdle = Self.tcpKeepaliveIdle
+            tcpOptions.keepaliveInterval = Self.tcpKeepaliveInterval
+            tcpOptions.keepaliveCount = Self.tcpKeepaliveCount
+
+            let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+            let newListener = try NWListener(using: parameters, on: nwPort)
             newListener.newConnectionHandler = { [weak self] connection in
                 self?.queue.async {
                     self?.accept(connection: connection)
@@ -680,7 +706,12 @@ public final class CameraRTSPServer {
     private func remove(client: Client) {
         let identifier = ObjectIdentifier(client.connection)
         guard clients.removeValue(forKey: identifier) != nil else { return }
+
+        client.playing = false
+        client.sendInFlight = false
+        client.sendGeneration &+= 1
         client.connection.cancel()
+
         Current.Log.info("Camera RTSP: client disconnected (\(clients.count) left)")
     }
 
@@ -1254,10 +1285,39 @@ public final class CameraRTSPServer {
             guard !accessUnit.isEmpty else { continue }
 
             client.sendInFlight = true
+            client.sendGeneration &+= 1
+
+            let identifier = ObjectIdentifier(client.connection)
+            let sendGeneration = client.sendGeneration
+
+            queue.asyncAfter(deadline: .now() + Self.rtpSendTimeout) { [weak self, weak client] in
+                guard let self, let client,
+                      let currentClient = self.clients[identifier],
+                      currentClient === client,
+                      client.sendInFlight,
+                      client.sendGeneration == sendGeneration else {
+                    return
+                }
+
+                self.stalledSendDisconnects += 1
+                Current.Log.warning(
+                    "Camera RTSP: RTP send stalled for \(Int(Self.rtpSendTimeout))s; " +
+                        "dropping stale client (watchdog disconnect #\(self.stalledSendDisconnects))"
+                )
+                self.remove(client: client)
+            }
+
             client.connection.send(content: accessUnit, completion: .contentProcessed { [weak self, weak client] error in
                 guard let self, let client else { return }
                 queue.async {
+                    guard let currentClient = self.clients[identifier],
+                          currentClient === client,
+                          client.sendGeneration == sendGeneration else {
+                        return
+                    }
+
                     client.sendInFlight = false
+
                     if let error {
                         Current.Log.warning("Camera RTSP: RTP send failed: \(error)")
                         self.remove(client: client)
