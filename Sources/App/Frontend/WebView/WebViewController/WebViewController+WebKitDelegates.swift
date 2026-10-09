@@ -19,6 +19,36 @@ extension WebViewController {
 
     func webView(
         _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard Current.kioskSettings.enabled,
+              navigationAction.targetFrame?.isMainFrame != false,
+              let url = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+
+        let restrictedPrefixes = [
+            "/profile",
+            "/config",
+            "/developer-tools",
+        ]
+
+        guard restrictedPrefixes.contains(where: { url.path.hasPrefix($0) }) else {
+            decisionHandler(.allow)
+            return
+        }
+
+        Current.Log.warning(
+            "Managed kiosk policy: blocking restricted frontend path \(url.path)"
+        )
+        decisionHandler(.cancel)
+        navigateToRoot()
+    }
+
+    func webView(
+        _ webView: WKWebView,
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
