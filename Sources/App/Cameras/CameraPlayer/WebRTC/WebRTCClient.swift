@@ -428,12 +428,15 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
                 if let error {
                     Current.Log.error("Failed to set local description: \(error.localizedDescription)")
                 }
-                completion(peerConnection.localDescription?.sdp ?? sdp.sdp)
+                let finalSDP = peerConnection.localDescription?.sdp ?? sdp.sdp
+                self.logTalkbackSDPSummary(label: "offer", sdp: finalSDP)
+                completion(finalSDP)
             })
         }
     }
 
     func set(remoteSdp: RTCSessionDescription, completion: @escaping (Error?) -> Void) {
+        logTalkbackSDPSummary(label: "answer", sdp: remoteSdp.sdp)
         peerConnection.setRemoteDescription(remoteSdp) { [weak self] error in
             if let error {
                 Current.Log.error("Failed to set remote description: \(error.localizedDescription)")
@@ -562,6 +565,50 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
 
     private static func audioPortDescription(_ port: AVAudioSessionPortDescription) -> String {
         "\(port.portName) [\(port.portType.rawValue)]"
+    }
+
+    /// Logs only the audio negotiation summary — never ICE candidates or addresses.
+    /// This is intentionally compact so a door01 field test immediately shows
+    /// whether go2rtc accepted a send-capable audio m-line and which codec was
+    /// negotiated for the backchannel.
+    private func logTalkbackSDPSummary(label: String, sdp: String) {
+        guard supportsTalkback else { return }
+
+        let lines = sdp.components(separatedBy: .newlines)
+        guard let audioStart = lines.firstIndex(where: { $0.hasPrefix("m=audio ") }) else {
+            Current.Log.warning("WebRTC talkback \(label): no audio m-line")
+            return
+        }
+
+        let audioEnd = lines[(audioStart + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[audioStart..<audioEnd]
+
+        let direction = section.first(where: {
+            $0 == "a=sendrecv" || $0 == "a=sendonly" || $0 == "a=recvonly" || $0 == "a=inactive"
+        })?.replacingOccurrences(of: "a=", with: "") ?? "unspecified"
+
+        let codecs = section.compactMap { line -> String? in
+            guard line.hasPrefix("a=rtpmap:"),
+                  let separator = line.firstIndex(of: " ") else {
+                return nil
+            }
+            return String(line[line.index(after: separator)...])
+        }
+
+        let g722 = codecs.first(where: { $0.uppercased().hasPrefix("G722/") })
+        Current.Log.info(
+            "WebRTC talkback \(label): direction=\(direction), "
+                + "g722=\(g722 ?? "not-negotiated"), codecs=[\(codecs.joined(separator: ", "))]"
+        )
+
+        if label == "answer", direction != "sendrecv", direction != "recvonly" {
+            // From the remote answer's point of view, recvonly means it accepts
+            // our microphone. sendrecv means bidirectional audio. sendonly or
+            // inactive would reject the iPad -> door01 path.
+            Current.Log.warning(
+                "WebRTC talkback answer does not accept microphone audio: direction=\(direction)"
+            )
+        }
     }
 
     /// Whether the peer connection can still carry media. iOS suspends the app after a short spell
