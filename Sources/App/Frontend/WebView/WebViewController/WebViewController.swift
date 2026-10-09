@@ -452,6 +452,16 @@ extension WebViewController {
             .store(in: &kioskCancellables)
 
         Current.kiosk.settingsPublisher
+            .map(\.enabled)
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                self?.updateManagedKioskLogoutGuard(enabled: enabled)
+            }
+            .store(in: &kioskCancellables)
+
+        Current.kiosk.settingsPublisher
             .map { $0.enabled && $0.hideStatusBar }
             .removeDuplicates()
             .dropFirst()
@@ -499,5 +509,17 @@ extension WebViewController {
             command: .kioskModeSet,
             payload: ["enable": enable]
         )
+        updateManagedKioskLogoutGuard(enabled: Current.kioskSettings.enabled)
+    }
+
+    private func updateManagedKioskLogoutGuard(enabled: Bool) {
+        let script = "window.__haManagedKioskLogoutBlocked = \(enabled ? "true" : "false");"
+        webView.evaluateJavaScript(script) { _, error in
+            if let error {
+                Current.Log.warning(
+                    "Managed kiosk policy: failed to update logout guard: \(error)"
+                )
+            }
+        }
     }
 }
