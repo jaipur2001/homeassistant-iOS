@@ -134,7 +134,27 @@ final class WebViewScriptMessageHandler: NSObject, WKScriptMessageHandler {
     /// asked to log in again instead of losing the server and everything configured against it
     /// (widgets, watch and CarPlay items, sensors, notification registration).
     private func handleRevokeExternalAuth(_ messageBody: [String: Any]) {
-        guard let callbackName = messageBody["callback"], let server = webView?.server else { return }
+        guard let callbackName = messageBody["callback"] as? String,
+              let server = webView?.server else { return }
+
+        if Current.kioskSettings.enabled {
+            Current.Log.warning(
+                "Managed kiosk policy: refusing Home Assistant logout token revocation"
+            )
+
+            // Reject the frontend's revoke() promise without touching the token.
+            // The document-start hass-logout guard should normally prevent this
+            // request entirely; this is the native enforcement backstop.
+            let script = "\(callbackName)(false, 'Logout is disabled while kiosk mode is active')"
+            webView?.evaluateJavaScript(script) { _, error in
+                if let error {
+                    Current.Log.warning(
+                        "Managed kiosk policy: failed to reject logout callback: \(error)"
+                    )
+                }
+            }
+            return
+        }
 
         Current.Log.warning("Revoking access token")
 
