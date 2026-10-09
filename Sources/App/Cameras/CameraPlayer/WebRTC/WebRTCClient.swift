@@ -585,7 +585,7 @@ final class WebRTCClient: NSObject, WebRTCStreamClient {
 
         let direction = section.first(where: {
             $0 == "a=sendrecv" || $0 == "a=sendonly" || $0 == "a=recvonly" || $0 == "a=inactive"
-        })?.replacingOccurrences(of: "a=", with: "") ?? "unspecified"
+        })?.replacingOccurrences(of: "a=", with: "") ?? "sendrecv"
 
         let codecs = section.compactMap { line -> String? in
             guard line.hasPrefix("a=rtpmap:"),
