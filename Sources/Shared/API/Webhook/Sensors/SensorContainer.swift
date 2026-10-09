@@ -101,8 +101,23 @@ public class SensorContainer {
     /// Bulk variant of `setEnabled(_:forUniqueID:)`, so changing many sensors at once signals
     /// observers a single time instead of once per sensor.
     public func setEnabled(_ value: Bool, forUniqueIDs ids: [String]) {
+        let effectiveIDs: [String]
+        if !value, Current.kioskSettings.enabled {
+            effectiveIDs = ids.filter { id in
+                if KioskModeManager.isMandatorySensor(uniqueID: id) {
+                    Current.Log.warning(
+                        "Managed kiosk policy: refusing to disable mandatory sensor \(id)"
+                    )
+                    return false
+                }
+                return true
+            }
+        } else {
+            effectiveIDs = ids
+        }
+
         // `filter` rather than a short-circuiting reduce, so every ID is actually written.
-        let changed = ids.filter { enablement.setEnabled(value, forUniqueID: $0) }
+        let changed = effectiveIDs.filter { enablement.setEnabled(value, forUniqueID: $0) }
         guard !changed.isEmpty else { return }
         notifySignal(reason: .settingsChange(changedUniqueIDs: changed))
     }
