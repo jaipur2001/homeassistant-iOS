@@ -52,11 +52,6 @@ final class KioskSettingsViewModel: ObservableObject {
         isInitialLoad = false
     }
 
-    func authenticateIfNeeded() {
-        guard settings.requireAuthentication, !isUnlocked else { return }
-        authenticate()
-    }
-
     func authenticate() {
         let context = LAContext()
         var error: NSError?
