@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
         with:
           ruby-version: "3.1"
@@ -42,10 +44,24 @@ jobs:
             swiftlint lint --strict --config .swiftlint.yml --reporter xcode
       - name: SwiftFormat
         if: ${{ success() || failure() }}
+        shell: bash
         run: |
-          docker run --rm -v `pwd`:`pwd` -w `pwd` \
-            ghcr.io/nicklockwood/swiftformat:0.53.1 \
-            --lint --config .swiftformat .
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            # Check all changed Swift files without reformatting unrelated legacy code.
+            git diff --name-only --diff-filter=ACMR HEAD^1 HEAD -- '*.swift' > .swiftformat-changed-files
+            if [[ ! -s .swiftformat-changed-files ]]; then
+              echo "No changed Swift files in this pull request."
+              exit 0
+            fi
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" \
+              ghcr.io/nicklockwood/swiftformat:0.53.1 \
+              --lint --config .swiftformat --filelist .swiftformat-changed-files
+          else
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" \
+              ghcr.io/nicklockwood/swiftformat:0.53.1 \
+              --lint --config .swiftformat .
+          fi
 
   check-swiftlint-disables:
     needs: lint

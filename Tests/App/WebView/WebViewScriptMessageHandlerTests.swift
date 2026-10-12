@@ -142,7 +142,6 @@ final class WebViewScriptMessageHandlerTests: XCTestCase {
         XCTAssertFalse(mockExternalMessageHandler.handleExternalMessageCalled)
     }
 
-
     @MainActor func testFrontendRestoredIsForwardedToTheController() {
         sut.isAppInBackground = { false }
 
@@ -174,7 +173,6 @@ final class WebViewScriptMessageHandlerTests: XCTestCase {
     private var handledExternalMessageTypes: [String?] {
         mockExternalMessageHandler.handledExternalMessages.map { $0["type"] as? String }
     }
-
 
     /// Points the environment at a single server the mock web view is showing. Its only URL refuses
     /// connections immediately, so the revoke request fails fast instead of reaching the network.

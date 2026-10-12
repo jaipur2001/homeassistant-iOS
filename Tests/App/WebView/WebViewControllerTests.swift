@@ -117,7 +117,6 @@ final class WebViewControllerTests: XCTestCase {
         XCTAssertEqual(returns, 1)
     }
 
-
     func testFrontendRestoredFromPageCacheReportsLoaded() {
         let sut = makeSUT()
         let overlayState = WebFrontendOverlayState()

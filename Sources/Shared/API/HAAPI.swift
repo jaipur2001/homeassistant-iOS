@@ -449,8 +449,7 @@ public class HomeAssistantAPI {
                 let absoluteURL = URL(
                     string: resolvedURLString,
                     relativeTo: baseURL
-                )?.absoluteURL
-            else {
+                )?.absoluteURL else {
                 throw APIError.cantBuildURL
             }
 

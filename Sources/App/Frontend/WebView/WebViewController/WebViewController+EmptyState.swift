@@ -35,7 +35,7 @@ extension WebViewController {
         didEnterBackgroundSinceLastActivation = false
         if returnedFromBackground {
             overlayState?.sceneReturnedFromBackground.send()
-            if emptyStateTimer != nil && !connectionState.isReadyForDisplay {
+            if emptyStateTimer != nil, !connectionState.isReadyForDisplay {
                 scheduleEmptyStateAfterGracePeriod()
             }
         }
