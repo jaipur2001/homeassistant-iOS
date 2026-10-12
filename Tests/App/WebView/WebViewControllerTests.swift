@@ -518,6 +518,7 @@ final class WebViewControllerTests: XCTestCase {
             URLError(.timedOut),
             URLError(.cancelled),
             NSError(domain: "WebKitErrorDomain", code: 102),
+            NSError(domain: "OtherDomain", code: 999),
         ]
         for error in notRedirecting {
             XCTAssertFalse(
