@@ -123,6 +123,17 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         return view.directionalEdgeInsets(for: .safeArea(cornerAdaptation: .vertical)).top
     }
 
+    /// Device idiom, injectable for layout tests on iPhone hosts.
+    var userInterfaceIdiom: @MainActor (UIView) -> UIUserInterfaceIdiom = { view in
+        view.traitCollection.userInterfaceIdiom
+    }
+
+    /// Window controls overlay only a windowed iPad scene, never a full-screen iPad kiosk.
+    var isSceneWindowed: @MainActor (UIView) -> Bool = { view in
+        guard let window = view.window, let screen = window.windowScene?.screen else { return false }
+        return WebViewController.sceneIsWindowed(windowSize: window.bounds.size, screenSize: screen.bounds.size)
+    }
+
     /// Handler for messages sent from the webview to the app
     var webViewExternalMessageHandler: WebViewExternalMessageHandlerProtocol = WebViewExternalMessageHandler(
         improvManager: ImprovManager.shared
@@ -471,6 +482,7 @@ extension WebViewController {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.setNeedsStatusBarAppearanceUpdate()
+                self?.updateThemedStatusBar()
             }
             .store(in: &kioskCancellables)
 
