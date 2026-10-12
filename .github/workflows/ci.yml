@@ -39,8 +39,9 @@ jobs:
         run: |
           docker run --rm -v `pwd`:`pwd` -w `pwd` \
             ghcr.io/realm/swiftlint:0.54.0 \
-            swiftlint lint --strict --config .swiftlint.yml --reporter github-actions-logging
+            swiftlint lint --strict --config .swiftlint.yml --reporter xcode
       - name: SwiftFormat
+        if: ${{ success() || failure() }}
         run: |
           docker run --rm -v `pwd`:`pwd` -w `pwd` \
             ghcr.io/nicklockwood/swiftformat:0.53.1 \
