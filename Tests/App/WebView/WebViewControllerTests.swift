@@ -1523,9 +1523,9 @@ final class WebViewControllerURLLoadingTests: XCTestCase {
         await waitUntil { sut.webView.url != nil }
         XCTAssertEqual(sut.webView.url?.host, "homeassistant.local")
 
-        // setUp() stubs network information, so the replacement can finish normally.
-        // Neither this await nor cleanup depends on releasing a checked continuation.
-        await sut.loadActiveURLTask?.value
+        // The replacement must settle within the bounded test wait; even if it fails,
+        // no test is allowed to await a task that may never complete.
+        await waitUntil { sut.loadActiveURLTask == nil }
         XCTAssertNil(sut.loadActiveURLTask)
     }
 

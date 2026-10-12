@@ -22,6 +22,17 @@ def newest_simulator(model, platform)
   newest.last['udid']
 end
 
+# Give every XCTest a finite execution allowance. This is especially important for tests
+# using async continuations: a stranded waiter must fail its test, not time out the entire CI job.
+def test_xcodebuild_arguments
+  [
+    'COMPILER_INDEX_STORE_ENABLE=NO',
+    '-test-timeouts-enabled YES',
+    '-default-test-execution-time-allowance 180',
+    '-maximum-test-execution-time-allowance 300'
+  ].join(' ')
+end
+
 desc 'Update the test cases from the fcm repo'
 lane :update_notification_test_cases do
   bundle_directory = File.expand_path('../Tests/Shared/notification_test_cases.bundle')
@@ -65,7 +76,7 @@ lane :test do
     # Run only the `test` action: `build test` compiles every SPM target twice
     # because the plain `build` action disables testability for packages.
     skip_build: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300',
+    xcargs: test_xcodebuild_arguments,
     destination: 'platform=iOS Simulator,name=iPhone 17,OS=latest'
   )
 
@@ -93,7 +104,7 @@ lane :test do
     skip_package_dependencies_resolution: true,
     skip_detect_devices: true,
     skip_build: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300',
+    xcargs: test_xcodebuild_arguments,
     destination: watch_destination
   )
 end
@@ -136,7 +147,7 @@ lane :e2e do |options|
     result_bundle: true,
     skip_package_dependencies_resolution: true,
     skip_detect_devices: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300',
+    xcargs: test_xcodebuild_arguments,
     destination: "platform=iOS Simulator,id=#{udid}",
     output_directory: 'fastlane/test_output/e2e'
   )
