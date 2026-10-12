@@ -103,6 +103,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// Wrapper around the application state; replaceable in tests.
     var isAppInBackground: @MainActor () -> Bool = { UIApplication.shared.applicationState == .background }
 
+    /// Tracks scene backgrounding independently of temporary inactive states (alerts / Control Center).
+    var didEnterBackgroundSinceLastActivation = false
+
     var blankFrontendRecoveryAttempts = 0
     var contentProcessTerminations = 0
 
@@ -266,6 +269,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         self.tokens.forEach { $0.cancel() }
         autoReloadTimer?.invalidate()
         loadActiveURLTask?.cancel()
+        NotificationCenter.default.removeObserver(self, name: UIScene.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: UIScene.didActivateNotification, object: nil)
     }
 
     static func makeWebViewConfiguration() -> WKWebViewConfiguration {
@@ -286,6 +291,11 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
 
         observeConnectionNotifications()
         setupKioskModeObservation()
+        // Scene notifications (not UIApplication only): the iPad can have multiple app windows.
+        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidEnterBackground(_:)),
+                                               name: UIScene.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidActivate(_:)),
+                                               name: UIScene.didActivateNotification, object: nil)
         observeSiriExposureForOnscreenContent()
         // Weakly held; surfaces re-authentication when this server's refresh token is rejected.
         Current.onboardingObservation.register(observer: self)
