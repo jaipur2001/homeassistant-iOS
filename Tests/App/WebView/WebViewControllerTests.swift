@@ -117,6 +117,62 @@ final class WebViewControllerTests: XCTestCase {
         XCTAssertEqual(returns, 1)
     }
 
+    /// Scene events from other objects must not disturb the iPad frontend. Real scene notifications
+    /// must resume the deferred WebSocket message bus after an actual background transition.
+    func testSceneNotificationsResumeFrontendOnlyAfterRealBackgroundEvent() throws {
+        let sut = makeSUT()
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first)
+        let background = Notification(name: UIScene.didEnterBackgroundNotification, object: scene)
+        let activated = Notification(name: UIScene.didActivateNotification, object: scene)
+        var foregroundReturns = 0
+        let subscription = overlayState.sceneReturnedFromBackground.sink { foregroundReturns += 1 }
+        defer { subscription.cancel() }
+
+        // Ignore notifications not originating from a real scene.
+        sut.sceneDidEnterBackground(Notification(name: UIScene.didEnterBackgroundNotification, object: NSObject()))
+        XCTAssertFalse(sut.didEnterBackgroundSinceLastActivation)
+
+        sut.sceneDidEnterBackground(background)
+        XCTAssertTrue(sut.didEnterBackgroundSinceLastActivation)
+        sut.sceneDidActivate(activated)
+
+        XCTAssertFalse(sut.didEnterBackgroundSinceLastActivation)
+        XCTAssertEqual(foregroundReturns, 1)
+    }
+
+    /// Re-arming the grace timer only happens after the scene really went to the background, and
+    /// only for a frontend which has not finished loading.
+    func testReturningFromBackgroundRearmsPendingDisconnectedGraceTimer() {
+        let sut = makeSUT()
+        sut.connectionState = .disconnected
+        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3_600, repeats: false) { _ in }
+        let previousTimer = sut.emptyStateTimer
+        defer { sut.emptyStateTimer?.invalidate() }
+
+        sut.handleSceneDidEnterBackground()
+        sut.handleSceneDidActivate()
+
+        XCTAssertFalse(previousTimer?.isValid ?? true)
+        XCTAssertTrue(sut.emptyStateTimer?.isValid ?? false)
+        XCTAssertFalse(previousTimer === sut.emptyStateTimer)
+    }
+
+    func testActivatingAlreadyLoadedFrontendPreservesExistingGraceTimer() {
+        let sut = makeSUT()
+        sut.connectionState = .loaded
+        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3_600, repeats: false) { _ in }
+        let previousTimer = sut.emptyStateTimer
+        defer { sut.emptyStateTimer?.invalidate() }
+
+        sut.handleSceneDidEnterBackground()
+        sut.handleSceneDidActivate()
+
+        XCTAssertTrue(previousTimer?.isValid ?? false)
+        XCTAssertTrue(previousTimer === sut.emptyStateTimer)
+    }
+
     func testFrontendRestoredFromPageCacheReportsLoaded() {
         let sut = makeSUT()
         let overlayState = WebFrontendOverlayState()
@@ -1455,6 +1511,23 @@ final class WebViewControllerURLLoadingTests: XCTestCase {
 
         XCTAssertNotNil(sut.loadActiveURLTask)
         await sut.loadActiveURLTask?.value
+    }
+
+    /// A root redirect without any configured server URL must not strand the WebView on an
+    /// unreachable page or keep retrying a redirect to a nil destination.
+    func testRootRedirectWithoutAnActiveURLShowsNoActiveURLOverlay() async {
+        let sut = makeSUT(server: .fake(update: { info in
+            info.connection.set(address: nil, for: .external)
+            _ = info.connection.evaluateActiveURL()
+        }))
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        defer { sut.redirectToRootTask?.cancel() }
+
+        sut.redirectToActiveURLRoot(failedURL: nil)
+
+        await waitUntil { overlayState.showsNoActiveURL }
+        XCTAssertTrue(overlayState.showsNoActiveURL)
     }
 
     func testLoadActiveURLRechecksBackgroundStateAfterFrontendAssetCacheCleanCheck() {
