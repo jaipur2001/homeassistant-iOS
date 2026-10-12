@@ -21,7 +21,10 @@ struct HomeAssistantStandByViewSnapshotTests {
             return
         }
 
-        await assertLightDarkWindowSnapshots(style: .clientCertificateRequired, named: "stand-by-client-certificate-required")
+        await assertLightDarkWindowSnapshots(
+            style: .clientCertificateRequired,
+            named: "stand-by-client-certificate-required"
+        )
     }
 
     @MainActor @Test func standByClientCertificateRejectedSnapshot() async throws {
@@ -30,7 +33,10 @@ struct HomeAssistantStandByViewSnapshotTests {
             return
         }
 
-        await assertLightDarkWindowSnapshots(style: .clientCertificateRejected, named: "stand-by-client-certificate-rejected")
+        await assertLightDarkWindowSnapshots(
+            style: .clientCertificateRejected,
+            named: "stand-by-client-certificate-rejected"
+        )
     }
 
     /// The web view's failures arrive while the loading state is already up, so the empty state usually

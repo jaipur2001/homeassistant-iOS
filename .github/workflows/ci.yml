@@ -163,6 +163,8 @@ jobs:
             ```
 
   test:
+    # Never allocate an expensive Xcode runner for a pull request that already fails lint.
+    needs: lint
     runs-on: xcode-27
     timeout-minutes: 90
     steps:
