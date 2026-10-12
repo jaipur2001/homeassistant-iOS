@@ -21,7 +21,10 @@ struct HomeAssistantStandByViewSnapshotTests {
             return
         }
 
-        assertLightDarkWindowSnapshots(style: .clientCertificateRequired, named: "stand-by-client-certificate-required")
+        await assertLightDarkWindowSnapshots(
+            style: .clientCertificateRequired,
+            named: "stand-by-client-certificate-required"
+        )
     }
 
     @MainActor @Test func standByClientCertificateRejectedSnapshot() async throws {
@@ -30,7 +33,10 @@ struct HomeAssistantStandByViewSnapshotTests {
             return
         }
 
-        assertLightDarkWindowSnapshots(style: .clientCertificateRejected, named: "stand-by-client-certificate-rejected")
+        await assertLightDarkWindowSnapshots(
+            style: .clientCertificateRejected,
+            named: "stand-by-client-certificate-rejected"
+        )
     }
 
     /// The web view's failures arrive while the loading state is already up, so the empty state usually
@@ -41,8 +47,8 @@ struct HomeAssistantStandByViewSnapshotTests {
             return
         }
 
-        let fromTheStart = render(style: .clientCertificateRequired, interfaceStyle: .light)
-        let afterLoading = render(style: .clientCertificateRequired, interfaceStyle: .light, startsLoading: true)
+        let fromTheStart = await render(style: .clientCertificateRequired, interfaceStyle: .light)
+        let afterLoading = await render(style: .clientCertificateRequired, interfaceStyle: .light, startsLoading: true)
 
         let diffing = Diffing<UIImage>.image(precision: 0.96, perceptualPrecision: 0.96)
         if let difference = diffing.diff(fromTheStart, afterLoading) {
@@ -77,10 +83,11 @@ struct HomeAssistantStandByViewSnapshotTests {
         testName: String = #function,
         line: UInt = #line,
         column: UInt = #column
-    ) {
+    ) async {
         for interfaceStyle in [UIUserInterfaceStyle.light, .dark] {
+            let image = await render(style: style, interfaceStyle: interfaceStyle)
             assertSnapshot(
-                of: render(style: style, interfaceStyle: interfaceStyle),
+                of: image,
                 as: .image(precision: 0.96, perceptualPrecision: 0.96),
                 named: "\(name)-\(interfaceStyle == .light ? "light" : "dark")",
                 fileID: fileID,
@@ -99,7 +106,7 @@ struct HomeAssistantStandByViewSnapshotTests {
         style: WebViewEmptyStateStyle,
         interfaceStyle: UIUserInterfaceStyle,
         startsLoading: Bool = false
-    ) -> UIImage {
+    ) async -> UIImage {
         let server = HomeAssistantStandByView.previewServer(
             name: "mTLS Server",
             configuredURLTypes: [.external],
@@ -128,14 +135,14 @@ struct HomeAssistantStandByViewSnapshotTests {
         controller.endAppearanceTransition()
         window.layoutIfNeeded()
         // Let the appear-driven state changes (the content fade-in) apply before drawing.
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+        try? await Task.sleep(for: .seconds(1))
         window.layoutIfNeeded()
 
         if startsLoading {
             // Same view identity, so the change handler moves it from loading to the empty state.
             controller.rootView = makeView(emptyState: emptyState)
             window.layoutIfNeeded()
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+            try? await Task.sleep(for: .seconds(1))
             window.layoutIfNeeded()
         }
 

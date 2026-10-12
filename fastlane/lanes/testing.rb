@@ -22,6 +22,17 @@ def newest_simulator(model, platform)
   newest.last['udid']
 end
 
+# Give every XCTest a finite execution allowance. This is especially important for tests
+# using async continuations: a stranded waiter must fail its test, not time out the entire CI job.
+def test_xcodebuild_arguments
+  [
+    'COMPILER_INDEX_STORE_ENABLE=NO',
+    '-test-timeouts-enabled YES',
+    '-default-test-execution-time-allowance 180',
+    '-maximum-test-execution-time-allowance 300'
+  ].join(' ')
+end
+
 desc 'Update the test cases from the fcm repo'
 lane :update_notification_test_cases do
   bundle_directory = File.expand_path('../Tests/Shared/notification_test_cases.bundle')
@@ -65,7 +76,7 @@ lane :test do
     # Run only the `test` action: `build test` compiles every SPM target twice
     # because the plain `build` action disables testability for packages.
     skip_build: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO',
+    xcargs: test_xcodebuild_arguments,
     destination: 'platform=iOS Simulator,name=iPhone 17,OS=latest'
   )
 
@@ -78,24 +89,27 @@ lane :test do
   newest_watch = available_simulators('watchOS')
                  .select { |_, device| device['name'] == watch_model }
                  .max_by { |runtime, _| runtime.scan(/\d+/).map(&:to_i) }
-  watch_destination =
-    if newest_watch
-      "platform=watchOS Simulator,id=#{newest_watch.last['udid']}"
-    else
-      "platform=watchOS Simulator,name=#{watch_model},OS=latest"
-    end
-
-  run_tests(
-    project: 'HomeAssistant.xcodeproj',
-    scheme: 'WatchApp',
-    only_testing: ['HomeAssistant-WatchAppTests'],
-    result_bundle: false,
-    skip_package_dependencies_resolution: true,
-    skip_detect_devices: true,
-    skip_build: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO',
-    destination: watch_destination
-  )
+  if newest_watch
+    # The snapshot references were recorded on this watch model. Do not silently substitute
+    # a different model, whose geometry could invalidate an otherwise correct snapshot.
+    run_tests(
+      project: 'HomeAssistant.xcodeproj',
+      scheme: 'WatchApp',
+      only_testing: ['HomeAssistant-WatchAppTests'],
+      result_bundle: false,
+      skip_package_dependencies_resolution: true,
+      skip_detect_devices: true,
+      skip_build: true,
+      xcargs: test_xcodebuild_arguments,
+      destination: "platform=watchOS Simulator,id=#{newest_watch.last['udid']}"
+    )
+  else
+    # Kiosk PRs still run every iOS unit test. A hosted macOS image without watchOS
+    # must not fail them just because the optional watch snapshot simulator is absent.
+    warning = "WatchApp tests not run: watchOS simulator '#{watch_model}' is unavailable."
+    UI.important(warning)
+    File.open(ENV['GITHUB_STEP_SUMMARY'], 'a') { |file| file.puts("⚠️ #{warning}") } if ENV['GITHUB_STEP_SUMMARY']
+  end
 end
 
 desc 'Run the end-to-end onboarding test against a running Home Assistant'

@@ -4,6 +4,7 @@ import FirebaseMessaging
 import Foundation
 import MediaPlayer
 import PromiseKit
+import SFSafeSymbols
 import Shared
 import SwiftUI
 import UserNotifications
@@ -234,7 +235,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
 
-                let server = self.cameraServer(
+                let server = cameraServer(
                     from: userInfo,
                     fallback: webViewController.server
                 )
@@ -252,11 +253,11 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                         Current.Log.info("Native kiosk media downloaded to \(localFileURL.path)")
 
                         if let requestedVolume {
-                            self.setSystemVolume(requestedVolume) { [weak self] in
+                            setSystemVolume(requestedVolume) { [weak self] in
                                 self?.startKioskAudio(fileURL: localFileURL)
                             }
                         } else {
-                            self.startKioskAudio(fileURL: localFileURL)
+                            startKioskAudio(fileURL: localFileURL)
                         }
                     }
                     .catch { error in
@@ -870,14 +871,14 @@ private struct KioskAlarmPayload {
     let acknowledgeEntityId: String
 
     init(userInfo: [AnyHashable: Any]) {
-        title = Self.string("alarm_title", in: userInfo) ?? "ALARM"
-        area = Self.string("alarm_area", in: userInfo) ?? "Unbekannter Bereich"
-        source = Self.string("alarm_source", in: userInfo) ?? "Unbekannte Alarmquelle"
-        priority = Self.integer("alarm_priority", in: userInfo) ?? 0
-        message = Self.string("alarm_message", in: userInfo)
+        self.title = Self.string("alarm_title", in: userInfo) ?? "ALARM"
+        self.area = Self.string("alarm_area", in: userInfo) ?? "Unbekannter Bereich"
+        self.source = Self.string("alarm_source", in: userInfo) ?? "Unbekannte Alarmquelle"
+        self.priority = Self.integer("alarm_priority", in: userInfo) ?? 0
+        self.message = Self.string("alarm_message", in: userInfo)
             ?? "Die akustische Alarmierung ist aktiv.\nBitte Ursache prüfen und anschließend den Alarm quittieren."
-        buttonText = Self.string("alarm_button_text", in: userInfo) ?? "QUITTIEREN"
-        acknowledgeEntityId = Self.string("ack_entity_id", in: userInfo) ?? "script.alarmansage_quittieren"
+        self.buttonText = Self.string("alarm_button_text", in: userInfo) ?? "QUITTIEREN"
+        self.acknowledgeEntityId = Self.string("ack_entity_id", in: userInfo) ?? "script.alarmansage_quittieren"
     }
 
     private static func string(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
@@ -994,7 +995,7 @@ private final class KioskAlarmOverlayPresenter {
             alarm: alarm,
             acknowledge: { [weak self, weak webViewController] in
                 guard let self, let webViewController else { return }
-                self.acknowledge(alarm: alarm, server: server, on: webViewController)
+                acknowledge(alarm: alarm, server: server, on: webViewController)
             }
         )
         .embeddedInHostingController()
@@ -1054,7 +1055,7 @@ private struct KioskAlarmView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 28) {
-                Image(systemName: "exclamationmark.triangle.fill")
+                Image(systemSymbol: .exclamationmarkTriangleFill)
                     .font(.system(size: 92, weight: .bold))
                     .foregroundStyle(.red)
 
@@ -1082,7 +1083,7 @@ private struct KioskAlarmView: View {
                     .padding(.top, 8)
 
                 Button(action: acknowledge) {
-                    Label(alarm.buttonText, systemImage: "checkmark.shield.fill")
+                    Label(alarm.buttonText, systemSymbol: .checkmarkShieldFill)
                         .font(.system(size: 30, weight: .black, design: .rounded))
                         .frame(maxWidth: 520)
                         .padding(.vertical, 22)
