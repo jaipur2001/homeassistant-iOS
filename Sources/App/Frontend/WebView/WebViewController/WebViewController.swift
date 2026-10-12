@@ -303,10 +303,18 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         observeConnectionNotifications()
         setupKioskModeObservation()
         // Scene notifications (not UIApplication only): the iPad can have multiple app windows.
-        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidEnterBackground(_:)),
-                                               name: UIScene.didEnterBackgroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidActivate(_:)),
-                                               name: UIScene.didActivateNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sceneDidEnterBackground(_:)),
+            name: UIScene.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sceneDidActivate(_:)),
+            name: UIScene.didActivateNotification,
+            object: nil
+        )
         observeSiriExposureForOnscreenContent()
         // Weakly held; surfaces re-authentication when this server's refresh token is rejected.
         Current.onboardingObservation.register(observer: self)
