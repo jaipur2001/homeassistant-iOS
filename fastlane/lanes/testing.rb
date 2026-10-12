@@ -65,7 +65,7 @@ lane :test do
     # Run only the `test` action: `build test` compiles every SPM target twice
     # because the plain `build` action disables testability for packages.
     skip_build: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO',
+    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300',
     destination: 'platform=iOS Simulator,name=iPhone 17,OS=latest'
   )
 
@@ -93,7 +93,7 @@ lane :test do
     skip_package_dependencies_resolution: true,
     skip_detect_devices: true,
     skip_build: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO',
+    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300',
     destination: watch_destination
   )
 end
@@ -136,7 +136,7 @@ lane :e2e do |options|
     result_bundle: true,
     skip_package_dependencies_resolution: true,
     skip_detect_devices: true,
-    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO',
+    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300',
     destination: "platform=iOS Simulator,id=#{udid}",
     output_directory: 'fastlane/test_output/e2e'
   )

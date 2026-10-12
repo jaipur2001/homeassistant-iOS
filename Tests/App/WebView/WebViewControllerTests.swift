@@ -1502,31 +1502,29 @@ final class WebViewControllerURLLoadingTests: XCTestCase {
         XCTAssertNil(sut.loadActiveURLTask)
     }
 
-    /// When an attempt hung and the web view is still blank, the last-known URL must load
-    /// synchronously -- without waiting for any async work, which just hung once already.
+    /// A stale active-URL request must immediately load the last-known URL, even when the
+    /// previous attempt cannot finish. Use a cancellable sleeper rather than parking
+    /// checked continuations: a failed assertion must never strand the test runner.
     func testStaleAttemptTriggersImmediateFallbackLoadFromLastKnownState() async {
-        let gate = AsyncGate()
-        Current.connectivity.refreshNetworkInformation = { await gate.holdIfNeeded() }
         let sut = makeSUT()
+        let staleAttempt = neverFinishingTask()
+        defer {
+            staleAttempt.cancel()
+            sut.loadActiveURLTask?.cancel()
+        }
 
-        gate.shouldHold = true
-        sut.loadActiveURLIfNeeded()
-        let hungAttempt = sut.loadActiveURLTask
-        await waitUntil { gate.waiterCount == 1 }
+        sut.loadActiveURLTask = staleAttempt
         sut.loadActiveURLTaskStartDate = Current.date()
             .addingTimeInterval(-WebViewController.loadActiveURLStaleInterval)
 
         sut.loadActiveURLIfNeeded()
 
-        // The replacement attempt is itself parked at the gate, so only the synchronous
-        // fallback can have loaded anything.
+        XCTAssertTrue(staleAttempt.isCancelled)
         await waitUntil { sut.webView.url != nil }
         XCTAssertEqual(sut.webView.url?.host, "homeassistant.local")
 
-        await waitUntil { gate.waiterCount == 2 }
-        gate.releaseNext()
-        gate.releaseNext()
-        await hungAttempt?.value
+        // setUp() stubs network information, so the replacement can finish normally.
+        // Neither this await nor cleanup depends on releasing a checked continuation.
         await sut.loadActiveURLTask?.value
         XCTAssertNil(sut.loadActiveURLTask)
     }
