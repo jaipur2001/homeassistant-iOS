@@ -147,7 +147,7 @@ final class WebViewControllerTests: XCTestCase {
     func testReturningFromBackgroundRearmsPendingDisconnectedGraceTimer() {
         let sut = makeSUT()
         sut.connectionState = .disconnected
-        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3_600, repeats: false) { _ in }
+        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { _ in }
         let previousTimer = sut.emptyStateTimer
         defer { sut.emptyStateTimer?.invalidate() }
 
@@ -162,7 +162,7 @@ final class WebViewControllerTests: XCTestCase {
     func testActivatingAlreadyLoadedFrontendPreservesExistingGraceTimer() {
         let sut = makeSUT()
         sut.connectionState = .loaded
-        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3_600, repeats: false) { _ in }
+        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { _ in }
         let previousTimer = sut.emptyStateTimer
         defer { sut.emptyStateTimer?.invalidate() }
 
