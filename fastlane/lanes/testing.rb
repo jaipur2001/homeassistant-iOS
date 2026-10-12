@@ -147,7 +147,7 @@ lane :e2e do |options|
     result_bundle: true,
     skip_package_dependencies_resolution: true,
     skip_detect_devices: true,
-    xcargs: test_xcodebuild_arguments,
+    xcargs: 'COMPILER_INDEX_STORE_ENABLE=NO',
     destination: "platform=iOS Simulator,id=#{udid}",
     output_directory: 'fastlane/test_output/e2e'
   )
