@@ -1,4 +1,5 @@
 import Alamofire
+import Combine
 import GRDB
 @testable import HomeAssistant
 @testable import Shared
@@ -82,6 +83,41 @@ final class WebViewControllerTests: XCTestCase {
     /// Going back to a page WebKit kept in its page cache restarts the stand-by loader, but the restored
     /// frontend already fired its one and only `frontend/loaded` and never fires it again, so the restore
     /// itself has to report the frontend as loaded or the loader covers a working page forever.
+    /// A page that loaded while the scene was away is still waiting for its `config/get` reply, and nothing
+    /// else would make the frontend ask again.
+    func testBecomingActiveDeliversFrontendMessagesHeldInTheBackground() {
+        let sut = makeSUT()
+        let externalMessageHandler = MockWebViewExternalMessageHandler()
+        sut.webViewExternalMessageHandler = externalMessageHandler
+        let scriptMessageHandler = sut.webViewScriptMessageHandler
+        scriptMessageHandler.isAppInBackground = { true }
+        scriptMessageHandler.handle(messageName: "externalBus", messageBody: ["id": 1, "type": "config/get"])
+
+        scriptMessageHandler.isAppInBackground = { false }
+        sut.handleSceneDidActivate()
+
+        XCTAssertEqual(externalMessageHandler.handledExternalMessages.map { $0["type"] as? String }, ["config/get"])
+    }
+
+    /// Only a return from the background tells the host: dismissing a system alert activates the scene without
+    /// it having been away.
+    func testBecomingActiveTellsTheHostOnlyWhenTheSceneReturnsFromTheBackground() {
+        let sut = makeSUT()
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        var returns = 0
+        let subscription = overlayState.sceneReturnedFromBackground.sink { returns += 1 }
+        defer { subscription.cancel() }
+
+        sut.handleSceneDidActivate()
+        XCTAssertEqual(returns, 0)
+
+        sut.handleSceneDidEnterBackground()
+        sut.handleSceneDidActivate()
+        XCTAssertEqual(returns, 1)
+    }
+
+
     func testFrontendRestoredFromPageCacheReportsLoaded() {
         let sut = makeSUT()
         let overlayState = WebFrontendOverlayState()
