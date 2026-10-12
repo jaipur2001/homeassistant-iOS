@@ -108,9 +108,7 @@ lane :test do
     # must not fail them just because the optional watch snapshot simulator is absent.
     warning = "WatchApp tests not run: watchOS simulator '#{watch_model}' is unavailable."
     UI.important(warning)
-    if ENV['GITHUB_STEP_SUMMARY']
-      File.open(ENV['GITHUB_STEP_SUMMARY'], 'a') { |file| file.puts("⚠️ #{warning}") }
-    end
+    File.open(ENV['GITHUB_STEP_SUMMARY'], 'a') { |file| file.puts("⚠️ #{warning}") } if ENV['GITHUB_STEP_SUMMARY']
   end
 end
 
