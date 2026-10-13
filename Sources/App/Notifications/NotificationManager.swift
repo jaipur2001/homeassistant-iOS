@@ -418,7 +418,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     return
                 }
 
-                guard self.doorbellRingtoneRequestID == requestID else {
+                guard doorbellRingtoneRequestID == requestID else {
                     Current.Log.info("Discarding stale doorbell ringtone download")
                     try? FileManager.default.removeItem(at: localFileURL)
                     return
@@ -427,7 +427,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                 Current.Log.info(
                     "Doorbell ringtone downloaded to \(localFileURL.lastPathComponent)"
                 )
-                self.startKioskAudio(
+                startKioskAudio(
                     fileURL: localFileURL,
                     purpose: .doorbell,
                     loops: -1
@@ -435,8 +435,8 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
             .catch { [weak self] error in
                 guard let self else { return }
-                if self.doorbellRingtoneRequestID == requestID {
-                    self.doorbellRingtoneRequestID = nil
+                if doorbellRingtoneRequestID == requestID {
+                    doorbellRingtoneRequestID = nil
                 }
                 Current.Log.error(
                     "Unable to resolve/download doorbell ringtone \(mediaContentId): \(error)"
@@ -1086,7 +1086,6 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 }
 
-
 private struct KioskDoorbellPayload {
     let stationId: String?
     let triggerEntityId: String?
@@ -1099,30 +1098,30 @@ private struct KioskDoorbellPayload {
         let routedArgument = message.flatMap(KioskPushCommand.argument(from:))
 
         if let routedArgument, routedArgument.contains(".") {
-            stationId = Self.string(
+            self.stationId = Self.string(
                 keys: ["station", "station_id"],
                 in: userInfo
             )
-            triggerEntityId = routedArgument
+            self.triggerEntityId = routedArgument
         } else if let routedArgument {
-            stationId = routedArgument
-            triggerEntityId = Self.string(
+            self.stationId = routedArgument
+            self.triggerEntityId = Self.string(
                 keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
                 in: userInfo
             )
         } else {
-            stationId = Self.string(
+            self.stationId = Self.string(
                 keys: ["station", "station_id"],
                 in: userInfo
             )
-            triggerEntityId = Self.string(
+            self.triggerEntityId = Self.string(
                 keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
                 in: userInfo
             )
         }
 
         let messageDiagnostic = routedArgument.map { " | message_route=\($0)" } ?? ""
-        diagnosticSummary = Self.describe(userInfo) + messageDiagnostic
+        self.diagnosticSummary = Self.describe(userInfo) + messageDiagnostic
     }
 
     private static func describe(_ dictionary: [AnyHashable: Any], depth: Int = 0) -> String {
@@ -1144,7 +1143,7 @@ private struct KioskDoorbellPayload {
             if let nested = dictionary[containerKey] as? [AnyHashable: Any] {
                 lines.append("\(containerKey){\(describe(nested, depth: depth + 1))}")
             } else if let nested = dictionary[containerKey] as? [String: Any] {
-                let converted = Dictionary<AnyHashable, Any>(
+                let converted = [AnyHashable: Any](
                     uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
                 )
                 lines.append("\(containerKey){\(describe(converted, depth: depth + 1))}")
@@ -1182,7 +1181,7 @@ private struct KioskDoorbellPayload {
             }
 
             if let nested = dictionary[containerKey] as? [String: Any] {
-                let converted = Dictionary<AnyHashable, Any>(
+                let converted = [AnyHashable: Any](
                     uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
                 )
                 if let value = string(keys: keys, in: converted, depth: depth + 1) {
@@ -1200,7 +1199,7 @@ private struct KioskDoorbellPayload {
             }
 
             if let nested = value as? [String: Any] {
-                let converted = Dictionary<AnyHashable, Any>(
+                let converted = [AnyHashable: Any](
                     uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
                 )
                 if let result = string(keys: keys, in: converted, depth: depth + 1) {
@@ -1698,7 +1697,7 @@ private final class KioskDoorbellOverlayPresenter {
             message: message,
             dismiss: { [weak self, weak webViewController] in
                 guard let self, let webViewController else { return }
-                self.hide(on: webViewController)
+                hide(on: webViewController)
             }
         )
         .embeddedInHostingController()
@@ -1745,7 +1744,7 @@ private final class KioskDoorbellOverlayPresenter {
             server: server,
             dismiss: { [weak self, weak webViewController] in
                 guard let self, let webViewController else { return }
-                self.hide(on: webViewController)
+                hide(on: webViewController)
             },
             stopRingtone: stopRingtone,
             performOpener: { [weak self] opener in
