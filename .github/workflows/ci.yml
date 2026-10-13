@@ -232,7 +232,7 @@ jobs:
 
       - name: Run targeted CI 35 diagnostics (temporary)
         run: |
-          echo "Diagnostic only: ZoneManager and AppIconShortcutItemsUpdater; full suite is not run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Diagnostic: ZoneManager and app shortcuts only." >> "$GITHUB_STEP_SUMMARY"
           bundle exec fastlane diagnose_ci35
 
       # Save the warmed DerivedData only from `main`, and only on a fresh key,
