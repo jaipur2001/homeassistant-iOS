@@ -110,9 +110,12 @@ struct AppIconShortcutItemsUpdaterTests {
         try await withConfiguredItems([entityItem(id: "light.kitchen")]) {
             AppIconShortcutItemsUpdater.update()
 
-            let published = await waitUntil { UIApplication.shared.shortcutItems?.isEmpty == false }
+            let expectedType = "appIconShortcut.1|entity|light.kitchen"
+            let published = await waitUntil {
+                UIApplication.shared.shortcutItems?.contains(where: { $0.type == expectedType }) == true
+            }
             #expect(published)
-            let item = UIApplication.shared.shortcutItems?.first
+            let item = UIApplication.shared.shortcutItems?.first(where: { $0.type == expectedType })
             #expect(item?.localizedTitle == "Kitchen light")
             #expect(item?.localizedSubtitle == "Kitchen")
         }

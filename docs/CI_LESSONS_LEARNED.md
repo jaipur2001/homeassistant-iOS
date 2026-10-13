@@ -27,6 +27,7 @@ Geltungsbereich: `jaipur2001/homeassistant-iOS`, insbesondere Kiosk-/Doorbell-In
 | CI #35 | 7 fehlgeschlagene Testfälle in ZoneManager und App-Shortcut-Tests; Xcode-Simulator-Diagnose dauerte weitere 600 s | Gemeinsam genutzten `Current`-Zustand aufräumen; betroffene Suites zuerst isolieren |
 | CI #36 | YamlLint fehlgeschlagen: Zeile mit 127 Zeichen bei Grenzwert 120 | Vor jedem Workflow-Commit YamlLint und Zeilenlänge kontrollieren |
 | CI #37 | Diagnosegruppen erfolgreich: Zone 12/12, Shortcuts 6/6, kombiniert 18/18 bei abgeschalteter Xcode-Parallelisierung | Gezielte Diagnose validiert die Fälle, ersetzt aber weder vollständigen Unit-Testlauf noch Coverage-Messung |
+| CI #38 | 4.506 Unit-Tests, nur `AppIconShortcutItemsUpdaterTests.resolvesNameAndArea()` fehlgeschlagen. Test wartete lediglich auf einen beliebigen Shortcut und las den zuvor gesetzten `test.pending`-Platzhalter. Zusätzlich 600 s Simulator-Sysdiagnose | Asynchrone Tests müssen auf **die erwartete Identität und den erwarteten Inhalt** warten, nicht auf `isEmpty == false`; Xcode-Diagnose mit `-collect-test-diagnostics never` abschalten |
 
 ## Unverzichtbarer Preflight vor jedem Code-Commit
 
@@ -101,3 +102,18 @@ Zustands- oder Timing-Wechselwirkungen, noch **kein** eindeutiger Ursachennachwe
 Die reguläre Testsuite bleibt das maßgebliche Gate. Die Diagnose-Lane kann bei
 Bedarf separat wiederverwendet werden. Globale `Current`-Test-Doubles müssen
 nach jedem Test zuverlässig auf den vorherigen Zustand zurückgesetzt werden.
+
+## CI #38: Konkrete Änderungen zur Vermeidung langer Fehlerschleifen
+
+- `AppIconShortcutItemsUpdaterTests.resolvesNameAndArea()` wartet auf den tatsächlichen
+  Shortcut-Typ `appIconShortcut.1|entity|light.kitchen`, bevor Titel und Bereich geprüft werden.
+- `test_xcodebuild_arguments` enthält `-collect-test-diagnostics never`. Dadurch
+  entfällt die automatische langwierige Simulator-Sysdiagnose bei Testfehlern.
+  Normale Testfehler, Konsolenlogs und die `.xcresult`-Datei bleiben erhalten.
+- Der LCOV-Konverter läuft nach einem fehlgeschlagenen, abgeschlossenen Testlauf
+  best effort weiter. Falls er eine verwertbare Coverage-Datei erzeugt,
+  wird diese in `test-logs` für die nächste Diagnose archiviert.
+  Die **verbindliche Patch-Coverage-Prüfung** läuft weiterhin nur mit der
+  regulären Coverage-Datei aus erfolgreich abgeschlossenen Tests.
+- `CI success` ist erst dann wahr, wenn die vollständige Testsuite und die
+  tatsächliche 90-%-Patch-Coverage-Prüfung erfolgreich sind.

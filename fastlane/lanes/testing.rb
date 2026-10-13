@@ -29,7 +29,8 @@ def test_xcodebuild_arguments
     'COMPILER_INDEX_STORE_ENABLE=NO',
     '-test-timeouts-enabled YES',
     '-default-test-execution-time-allowance 180',
-    '-maximum-test-execution-time-allowance 300'
+    '-maximum-test-execution-time-allowance 300',
+    '-collect-test-diagnostics never'
   ].join(' ')
 end
 
