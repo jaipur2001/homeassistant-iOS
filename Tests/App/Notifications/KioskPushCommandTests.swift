@@ -278,7 +278,6 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertTrue(payload.diagnosticSummary.contains("keys=[aps]"))
     }
 
-
     // MARK: - Alarm push payload
 
     func testAlarmPayloadUsesDefaultsWhenMissing() {
