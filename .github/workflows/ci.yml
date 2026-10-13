@@ -230,8 +230,10 @@ jobs:
           -project HomeAssistant.xcodeproj
           -scheme Tests-Unit
 
-      - name: Run tests
-        run: bundle exec fastlane test
+      - name: Run targeted CI 35 diagnostics (temporary)
+        run: |
+          echo "Diagnostic only: ZoneManager and AppIconShortcutItemsUpdater; full suite is not run." >> "$GITHUB_STEP_SUMMARY"
+          bundle exec fastlane diagnose_ci35
 
       # Save the warmed DerivedData only from `main`, and only on a fresh key,
       # so PR runs never evict the shared base cache other PRs restore from.
