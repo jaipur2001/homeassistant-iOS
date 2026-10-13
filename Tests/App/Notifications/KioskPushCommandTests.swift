@@ -277,4 +277,81 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertNil(payload.triggerEntityId)
         XCTAssertTrue(payload.diagnosticSummary.contains("keys=[aps]"))
     }
+
+
+    // MARK: - Alarm push payload
+
+    func testAlarmPayloadUsesDefaultsWhenMissing() {
+        let payload = KioskAlarmPayload(userInfo: [:])
+
+        XCTAssertEqual(payload.title, "ALARM")
+        XCTAssertEqual(payload.area, "Unbekannter Bereich")
+        XCTAssertEqual(payload.source, "Unbekannte Alarmquelle")
+        XCTAssertEqual(payload.priority, 0)
+        XCTAssertEqual(payload.buttonText, "QUITTIEREN")
+        XCTAssertEqual(payload.acknowledgeEntityId, "script.alarmansage_quittieren")
+        XCTAssertTrue(payload.message.contains("Alarmierung"))
+    }
+
+    func testAlarmPayloadReadsRootValuesAndNumericPriority() {
+        let payload = KioskAlarmPayload(userInfo: [
+            "alarm_title": "Einbruch",
+            "alarm_area": "Garage",
+            "alarm_source": "Fenster",
+            "alarm_priority": 5,
+            "alarm_message": "Fenster geöffnet",
+            "alarm_button_text": "Bestätigen",
+            "ack_entity_id": "script.alarm_ack",
+        ])
+
+        XCTAssertEqual(payload.title, "Einbruch")
+        XCTAssertEqual(payload.area, "Garage")
+        XCTAssertEqual(payload.source, "Fenster")
+        XCTAssertEqual(payload.priority, 5)
+        XCTAssertEqual(payload.message, "Fenster geöffnet")
+        XCTAssertEqual(payload.buttonText, "Bestätigen")
+        XCTAssertEqual(payload.acknowledgeEntityId, "script.alarm_ack")
+    }
+
+    func testAlarmPayloadReadsNestedHomeAssistantValues() {
+        let payload = KioskAlarmPayload(userInfo: [
+            "homeassistant": [
+                "alarm_title": "Tamper",
+                "alarm_priority": "7",
+                "alarm_area": "Haustür",
+                "ack_entity_id": "script.quittieren",
+            ],
+        ])
+
+        XCTAssertEqual(payload.title, "Tamper")
+        XCTAssertEqual(payload.area, "Haustür")
+        XCTAssertEqual(payload.priority, 7)
+        XCTAssertEqual(payload.acknowledgeEntityId, "script.quittieren")
+    }
+
+    func testAlarmPayloadIgnoresEmptyStringsAndInvalidPriority() {
+        let payload = KioskAlarmPayload(userInfo: [
+            "alarm_title": " ",
+            "alarm_priority": "invalid",
+            "alarm_message": "",
+        ])
+
+        XCTAssertEqual(payload.title, "ALARM")
+        XCTAssertEqual(payload.priority, 0)
+        XCTAssertTrue(payload.message.contains("Alarmierung"))
+    }
+
+    func testAlarmPayloadRootValuesWinOverNestedValues() {
+        let payload = KioskAlarmPayload(userInfo: [
+            "alarm_title": "Root",
+            "alarm_priority": "3",
+            "homeassistant": [
+                "alarm_title": "Nested",
+                "alarm_priority": 8,
+            ],
+        ])
+
+        XCTAssertEqual(payload.title, "Root")
+        XCTAssertEqual(payload.priority, 3)
+    }
 }
