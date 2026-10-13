@@ -2073,7 +2073,7 @@ private struct KioskDoorbellView: View {
     }
 }
 
-private struct KioskAlarmPayload {
+struct KioskAlarmPayload {
     let title: String
     let area: String
     let source: String
