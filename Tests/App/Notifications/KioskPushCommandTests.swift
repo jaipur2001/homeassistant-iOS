@@ -223,6 +223,7 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertNil(KioskPushCommand.showScreensaver.screensaverMode(from: ["mode": "clock"]))
         XCTAssertNil(KioskPushCommand.setBrightness.screensaverMode(from: ["mode": "clock"]))
     }
+
     // MARK: - Doorbell payload routing
 
     func testDoorbellPayloadUsesRoutedTriggerEntity() {
@@ -276,5 +277,4 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertNil(payload.triggerEntityId)
         XCTAssertTrue(payload.diagnosticSummary.contains("keys=[aps]"))
     }
-
 }
