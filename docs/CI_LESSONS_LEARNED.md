@@ -24,6 +24,9 @@ Geltungsbereich: `jaipur2001/homeassistant-iOS`, insbesondere Kiosk-/Doorbell-In
 | CI #31 | `lint` / SwiftFormat fehlgeschlagen; fehlende Leerzeile bei `// MARK:` und überflüssige Leerzeile vor `}`; Tests übersprungen | SwiftFormat 0.53.1 mit **projektspezifischer** `.swiftformat` vor Commit |
 | CI #32 | Lint und Tests erfolgreich; Coverage **67,74 % (210/310)**; u. a. `NotificationManager.swift` 30/95 und `CameraStreamServer.swift` 2/33 | Tests für fachliche Pfade ausbauen; für asynchrones RTP/RTSP echte Test-Seams und Fake-Verbindungen nutzen |
 | CI #33 | SwiftFormat fehlgeschlagen: doppelte Leerzeile vor `// MARK:`; Tests übersprungen | Konsequente Formatprüfung **nach der letzten Dateiänderung** und vor jedem Commit |
+| CI #35 | 7 fehlgeschlagene Testfälle in ZoneManager und App-Shortcut-Tests; Xcode-Simulator-Diagnose dauerte weitere 600 s | Gemeinsam genutzten `Current`-Zustand aufräumen; betroffene Suites zuerst isolieren |
+| CI #36 | YamlLint fehlgeschlagen: Zeile mit 127 Zeichen bei Grenzwert 120 | Vor jedem Workflow-Commit YamlLint und Zeilenlänge kontrollieren |
+| CI #37 | Diagnosegruppen erfolgreich: Zone 12/12, Shortcuts 6/6, kombiniert 18/18 bei abgeschalteter Xcode-Parallelisierung | Gezielte Diagnose validiert die Fälle, ersetzt aber weder vollständigen Unit-Testlauf noch Coverage-Messung |
 
 ## Unverzichtbarer Preflight vor jedem Code-Commit
 
@@ -63,7 +66,7 @@ rm -f .swiftformat-changed-files
 
 1. **Lint-first:** `test` hängt von `lint` ab, damit kein teurer Xcode-Runner für einen schon statisch ungültigen Commit startet.
 2. **Gezielt testen:** Lokal/auf einem geeigneten macOS-Runner zunächst die betroffene Testklasse bzw. Testmethode ausführen. Nur danach die vollständige Testsuite.
-3. **Coverage ehrlich auswerten:** `Patch coverage` benötigt eine erfolgreiche Messung; bei Testabbruch ist ein erfolgreich beendeter Coverage-Job ggf. lediglich **übersprungen**.
+3. **Coverage ehrlich auswerten:** `Patch coverage` benötigt eine erfolgreiche Messung; bei Testabbruch ist ein erfolgreich beendeter Coverage-Job ggf. lediglich **übersprungen**. Nach erfolgreichen Tests ohne LCOV muss der Coverage-Job fehlschlagen.
 4. **SPM-/DerivedData-Cache:** Nur bei unveränderten relevanten Eingangsbedingungen wiederverwenden. Bei geänderten Package-Pins veraltete vorkompilierte Module entsprechend Workflow-Logik entfernen.
 5. **Xcode-/Simulator-Diagnosen:** Timeout beim Einsammeln von Simulator-Diagnosen nicht mit dem ursprünglichen Testfehler verwechseln.
 6. **Keine unbedachten Workflow-Pushes:** Auch Dokumentations-Commits können bei offenem PR CI auslösen. Wenn reine Docs ohne lange Tests gepflegt werden sollen, erst separat eine überprüfte und sichere Pfadfilter-Regel entwickeln.
@@ -90,3 +93,11 @@ rm -f .swiftformat-changed-files
 - GitHub Actions: CI [#25](https://github.com/jaipur2001/homeassistant-iOS/actions/runs/38257618698), [#29](https://github.com/jaipur2001/homeassistant-iOS/actions/runs/38375075948), [#30](https://github.com/jaipur2001/homeassistant-iOS/actions/runs/38381888584), [#31](https://github.com/jaipur2001/homeassistant-iOS/actions/runs/38390763311), [#32](https://github.com/jaipur2001/homeassistant-iOS/actions/runs/38391146496), [#33](https://github.com/jaipur2001/homeassistant-iOS/actions/runs/38399201419)
 
 **Pflegepflicht:** Jeden neuen Fehlertyp mit Ursache, Prävention und verifiziertem Ergebnis ergänzen. Bei wiederholten Fehlern insbesondere dokumentieren, warum der Preflight sie nicht erkannt hat.
+
+## CI #37: bestätigte Test-Isolation und Rückkehr zur regulären CI
+
+Die fokussierten Tests bestanden ohne Xcode-Parallelisierung. Das ist ein Indiz für
+Zustands- oder Timing-Wechselwirkungen, noch **kein** eindeutiger Ursachennachweis.
+Die reguläre Testsuite bleibt das maßgebliche Gate. Die Diagnose-Lane kann bei
+Bedarf separat wiederverwendet werden. Globale `Current`-Test-Doubles müssen
+nach jedem Test zuverlässig auf den vorherigen Zustand zurückgesetzt werden.

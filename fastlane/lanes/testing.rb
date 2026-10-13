@@ -103,7 +103,7 @@ lane :test do
     # Run only the `test` action: `build test` compiles every SPM target twice
     # because the plain `build` action disables testability for packages.
     skip_build: true,
-    xcargs: test_xcodebuild_arguments,
+    xcargs: "#{test_xcodebuild_arguments} -parallel-testing-enabled NO",
     destination: 'platform=iOS Simulator,name=iPhone 17,OS=latest'
   )
 

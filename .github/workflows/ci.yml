@@ -230,10 +230,8 @@ jobs:
           -project HomeAssistant.xcodeproj
           -scheme Tests-Unit
 
-      - name: Run targeted CI 35 diagnostics (temporary)
-        run: |
-          echo "Diagnostic: ZoneManager and app shortcuts only." >> "$GITHUB_STEP_SUMMARY"
-          bundle exec fastlane diagnose_ci35
+      - name: Run complete unit test suite
+        run: bundle exec fastlane test
 
       # Save the warmed DerivedData only from `main`, and only on a fresh key,
       # so PR runs never evict the shared base cache other PRs restore from.
@@ -334,11 +332,15 @@ jobs:
           name: coverage-lcov
           path: fastlane/test_output
 
-      # Coverage that could not be measured must not block: when the conversion or the
-      # artifact is missing, this step is skipped and sets no output, which leaves the
-      # gate reporting nothing and dismisses any request an earlier run left behind,
-      # rather than blocking on a number nobody can act on. The step itself is
-      # `continue-on-error` because the script exits nonzero to report the shortfall.
+      # A failed test run has no trustworthy coverage report. If all tests pass,
+      # the tracefile is mandatory, and this gate must never silently skip it.
+      # Measurement itself is continue-on-error to publish the exact shortfall.
+      - name: Require coverage after successful tests
+        if: needs.test.result == 'success' && steps.tracefile.outcome != 'success'
+        run: |
+          echo "::error::Unit tests passed, but the LCOV tracefile is missing"
+          exit 1
+
       - name: Measure patch coverage
         id: coverage
         if: steps.tracefile.outcome == 'success'

@@ -61,8 +61,14 @@ struct AppIconShortcutItemsUpdaterTests {
         return database
     }
 
+    @MainActor
     private func withConfiguredItems(_ items: [MagicItem], _ body: () async throws -> Void) async throws {
         let database = try makeDatabase(items: items)
+
+        let previousShortcutItems = UIApplication.shared.shortcutItems
+        UIApplication.shared.shortcutItems = [
+            UIApplicationShortcutItem(type: "test.pending", localizedTitle: "Waiting for update"),
+        ]
 
         let previousDatabase = Current.database
         let previousProvider = Current.magicItemProvider
@@ -74,7 +80,7 @@ struct AppIconShortcutItemsUpdaterTests {
             Current.database = previousDatabase
             Current.magicItemProvider = previousProvider
             Current.backgroundTask = previousRunner
-            DispatchQueue.main.async { UIApplication.shared.shortcutItems = [] }
+            UIApplication.shared.shortcutItems = previousShortcutItems
         }
 
         try await body()

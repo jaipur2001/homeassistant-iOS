@@ -1224,7 +1224,7 @@ struct KioskDoorbellPayload {
     }
 }
 
-private struct KioskDoorbellOpener: Identifiable, Equatable {
+struct KioskDoorbellOpener: Identifiable, Equatable {
     enum Kind: Int {
         case door
         case gate
@@ -1262,7 +1262,7 @@ private struct KioskDoorbellOpener: Identifiable, Equatable {
     }
 }
 
-private struct KioskDoorbellStation {
+struct KioskDoorbellStation {
     let id: String
     let name: String
     let cameraEntityId: String
@@ -1276,7 +1276,7 @@ private struct KioskDoorbellStation {
     let openers: [KioskDoorbellOpener]
 }
 
-private enum KioskDoorbellStationResolver {
+enum KioskDoorbellStationResolver {
     enum ResolveError: LocalizedError {
         case stationMissing(String)
         case triggerEntityNotFound(String)
@@ -1374,7 +1374,7 @@ private enum KioskDoorbellStationResolver {
         }
     }
 
-    private static func resolve(
+    static func resolve(
         userInfo: [AnyHashable: Any],
         message: String?,
         entities: [EntityRegistryListForDisplay.Entity],
