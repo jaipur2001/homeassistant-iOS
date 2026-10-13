@@ -223,4 +223,58 @@ final class KioskPushCommandTests: XCTestCase {
         XCTAssertNil(KioskPushCommand.showScreensaver.screensaverMode(from: ["mode": "clock"]))
         XCTAssertNil(KioskPushCommand.setBrightness.screensaverMode(from: ["mode": "clock"]))
     }
+    // MARK: - Doorbell payload routing
+
+    func testDoorbellPayloadUsesRoutedTriggerEntity() {
+        let payload = KioskDoorbellPayload(
+            userInfo: ["homeassistant": ["station_id": "haustuer"]],
+            message: "kiosk_show_doorbell|binary_sensor.klingel_haustuer"
+        )
+
+        XCTAssertEqual(payload.stationId, "haustuer")
+        XCTAssertEqual(payload.triggerEntityId, "binary_sensor.klingel_haustuer")
+        XCTAssertTrue(payload.diagnosticSummary.contains("message_route=binary_sensor.klingel_haustuer"))
+    }
+
+    func testDoorbellPayloadUsesRoutedStationAndNestedTrigger() {
+        let payload = KioskDoorbellPayload(
+            userInfo: ["homeassistant": ["data": ["trigger_entity_id": "binary_sensor.klingel_haustuer"]]],
+            message: "kiosk_show_doorbell|station_haustuer"
+        )
+
+        XCTAssertEqual(payload.stationId, "station_haustuer")
+        XCTAssertEqual(payload.triggerEntityId, "binary_sensor.klingel_haustuer")
+    }
+
+    func testDoorbellPayloadFindsFieldsInsideGenericWrapper() {
+        let payload = KioskDoorbellPayload(userInfo: [
+            "notification": [
+                "data": [
+                    "station": "  station_haustuer  ",
+                    "doorbell_entity_id": "binary_sensor.klingel_haustuer",
+                ],
+            ],
+        ])
+
+        XCTAssertEqual(payload.stationId, "station_haustuer")
+        XCTAssertEqual(payload.triggerEntityId, "binary_sensor.klingel_haustuer")
+    }
+
+    func testDoorbellPayloadPrefersHomeAssistantContainerOverUnrelatedFields() {
+        let payload = KioskDoorbellPayload(userInfo: [
+            "other": ["station": "station_wrong"],
+            "homeassistant": ["station": "station_haustuer"],
+        ])
+
+        XCTAssertEqual(payload.stationId, "station_haustuer")
+    }
+
+    func testDoorbellPayloadKeepsMissingRoutingFieldsNil() {
+        let payload = KioskDoorbellPayload(userInfo: ["aps": ["alert": "Doorbell"]])
+
+        XCTAssertNil(payload.stationId)
+        XCTAssertNil(payload.triggerEntityId)
+        XCTAssertTrue(payload.diagnosticSummary.contains("keys=[aps]"))
+    }
+
 }
