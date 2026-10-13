@@ -1329,6 +1329,18 @@ public final class CameraRTSPServer {
         }
     }
 
+    #if DEBUG
+    /// Injects an encoded access unit through the real RTSP transport for loopback tests.
+    /// The server still owns and serializes all client/packet state on its normal queue.
+    func testBroadcast(nalUnits: [Data], sps: Data?, pps: Data?, isKeyframe: Bool) {
+        queue.sync {
+            self.sps = sps
+            self.pps = pps
+            broadcast(nalUnits: nalUnits, timestamp: 90_000, isKeyframe: isKeyframe)
+        }
+    }
+    #endif
+
     private func appendRTPPackets(
         for nalUnit: Data,
         timestamp: UInt32,
