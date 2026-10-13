@@ -6,6 +6,41 @@ import UIKit
 // MARK: - Empty State
 
 extension WebViewController {
+    /// Only this window's lifecycle should flush the bus. Without a hosting window (e.g. tests), accept any scene.
+    private func concernsFrontendScene(_ notification: Notification) -> Bool {
+        guard let scene = notification.object as? UIScene else { return false }
+        guard let frontendScene = view.window?.windowScene else { return true }
+        return scene === frontendScene
+    }
+
+    @objc func sceneDidEnterBackground(_ notification: Notification) {
+        guard concernsFrontendScene(notification) else { return }
+        handleSceneDidEnterBackground()
+    }
+
+    @objc func sceneDidActivate(_ notification: Notification) {
+        guard concernsFrontendScene(notification) else { return }
+        handleSceneDidActivate()
+    }
+
+    func handleSceneDidEnterBackground() {
+        didEnterBackgroundSinceLastActivation = true
+    }
+
+    /// Foreground activation is the reliable opportunity to answer config/get from a background-loaded page.
+    /// Re-arm the SwiftUI loader watchdog only when returning from an actual background transition.
+    func handleSceneDidActivate() {
+        webViewScriptMessageHandler.deliverDeferredMessages()
+        let returnedFromBackground = didEnterBackgroundSinceLastActivation
+        didEnterBackgroundSinceLastActivation = false
+        if returnedFromBackground {
+            overlayState?.sceneReturnedFromBackground.send()
+            if emptyStateTimer != nil, !connectionState.isReadyForDisplay {
+                scheduleEmptyStateAfterGracePeriod()
+            }
+        }
+    }
+
     func emptyStateStyle(for connectionState: FrontEndConnectionState) -> WebViewEmptyStateStyle {
         // A deliberate log out lands in the same authentication-less state as a revoked token, so it is
         // resolved first: the copy has to read as "log back in", not "your session expired".
