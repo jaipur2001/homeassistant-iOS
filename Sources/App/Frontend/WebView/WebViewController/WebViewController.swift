@@ -555,7 +555,7 @@ extension WebViewController {
         }
         """
 
-        webView.evaluateJavaScript(script) { _, error in
+        webView?.evaluateJavaScript(script) { _, error in
             if let error {
                 Current.Log.warning(
                     "Managed kiosk policy: failed to update frontend policy: \(error)"
