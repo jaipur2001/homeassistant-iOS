@@ -65,6 +65,33 @@ lane :update_dsyms do
   FileUtils.rm_r directory
 end
 
+# Temporary CI #35 diagnostic: execute each unstable suite alone and then both together.
+# No full suite or coverage claim is made by this lane.
+desc 'Diagnose CI 35 asynchronous test interactions'
+lane :diagnose_ci35 do
+  suites = [
+    ['zone-only', ['Tests-App/ZoneManagerTests']],
+    ['shortcuts-only', ['Tests-App/AppIconShortcutItemsUpdaterTests']],
+    ['zone-and-shortcuts', ['Tests-App/ZoneManagerTests', 'Tests-App/AppIconShortcutItemsUpdaterTests']]
+  ]
+
+  suites.each do |label, selected|
+    UI.message("CI #35 diagnostic: #{label}")
+    run_tests(
+      project: 'HomeAssistant.xcodeproj',
+      scheme: 'Tests-Unit',
+      only_testing: selected,
+      result_bundle: false,
+      skip_package_dependencies_resolution: true,
+      skip_detect_devices: true,
+      skip_build: true,
+      xcargs: "#{test_xcodebuild_arguments} -parallel-testing-enabled NO",
+      destination: 'platform=iOS Simulator,name=iPhone 17,OS=latest',
+      output_directory: "fastlane/test_output/ci35-#{label}"
+    )
+  end
+end
+
 desc 'Run tests'
 lane :test do
   run_tests(
