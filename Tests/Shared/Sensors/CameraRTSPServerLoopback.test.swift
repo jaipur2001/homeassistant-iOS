@@ -47,7 +47,7 @@ final class CameraRTSPServerLoopbackTests: XCTestCase {
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             address.sin_family = sa_family_t(AF_INET)
             address.sin_port = port.bigEndian
-            address.sin_addr = in_addr(s_addr: in_addr_t(0x7F000001).bigEndian)
+            address.sin_addr = in_addr(s_addr: in_addr_t(0x7F00_0001).bigEndian)
             let connected = withUnsafePointer(to: &address) { pointer -> Int32 in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                     Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -62,7 +62,7 @@ final class CameraRTSPServerLoopbackTests: XCTestCase {
 
     func testRTSPReceivesInterleavedControlAndSendsKeyframeRTP() throws {
         let server = CameraRTSPServer()
-        let port = UInt16.random(in: 40_000 ... 49_999)
+        let port = UInt16.random(in: 40000 ... 49999)
         let originalPort = server.port
         server.port = Int(port)
         defer {
@@ -128,7 +128,7 @@ final class CameraRTSPServerLoopbackTests: XCTestCase {
         XCTAssertTrue(rtp.range(of: Data([0x24, 0x02])) != nil, "No interleaved RTP arrived")
 
         let deadline = Date().addingTimeInterval(3)
-        while server.debugSendingClientCount != 0 && Date() < deadline {
+        while server.debugSendingClientCount != 0, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
         XCTAssertEqual(server.debugSendingClientCount, 0)

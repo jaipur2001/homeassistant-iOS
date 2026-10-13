@@ -1336,7 +1336,7 @@ public final class CameraRTSPServer {
         queue.sync {
             self.sps = sps
             self.pps = pps
-            broadcast(nalUnits: nalUnits, timestamp: 90_000, isKeyframe: isKeyframe)
+            broadcast(nalUnits: nalUnits, timestamp: 90000, isKeyframe: isKeyframe)
         }
     }
     #endif
