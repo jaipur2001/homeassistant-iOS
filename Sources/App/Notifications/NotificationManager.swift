@@ -1172,22 +1172,8 @@ private struct KioskDoorbellPayload {
             }
         }
 
-        // Search the notification containers we expect first so unrelated APNS
-        // dictionaries do not accidentally win over the Home Assistant payload.
-        for containerKey in ["homeassistant", "data"] {
-            if let nested = dictionary[containerKey] as? [AnyHashable: Any],
-               let value = string(keys: keys, in: nested, depth: depth + 1) {
-                return value
-            }
-
-            if let nested = dictionary[containerKey] as? [String: Any] {
-                let converted = [AnyHashable: Any](
-                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
-                )
-                if let value = string(keys: keys, in: converted, depth: depth + 1) {
-                    return value
-                }
-            }
+        if let value = stringInPreferredContainers(keys: keys, in: dictionary, depth: depth) {
+            return value
         }
 
         // Final bounded fallback for delivery variants that wrap custom data in
@@ -1204,6 +1190,32 @@ private struct KioskDoorbellPayload {
                 )
                 if let result = string(keys: keys, in: converted, depth: depth + 1) {
                     return result
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func stringInPreferredContainers(
+        keys: Set<String>,
+        in dictionary: [AnyHashable: Any],
+        depth: Int
+    ) -> String? {
+        // Search the notification containers we expect first so unrelated APNS
+        // dictionaries do not accidentally win over the Home Assistant payload.
+        for containerKey in ["homeassistant", "data"] {
+            if let nested = dictionary[containerKey] as? [AnyHashable: Any],
+               let value = string(keys: keys, in: nested, depth: depth + 1) {
+                return value
+            }
+
+            if let nested = dictionary[containerKey] as? [String: Any] {
+                let converted = [AnyHashable: Any](
+                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
+                )
+                if let value = string(keys: keys, in: converted, depth: depth + 1) {
+                    return value
                 }
             }
         }
@@ -1238,14 +1250,14 @@ private struct KioskDoorbellOpener: Identifiable, Equatable {
         }
     }
 
-    var systemImage: String {
+    var systemSymbol: SFSymbol {
         switch kind {
         case .door:
-            return "lock.open.fill"
+            return .lockOpenFill
         case .gate:
-            return "door.garage.open"
+            return .doorGarageOpen
         case .generic:
-            return "lock.open"
+            return .lockOpen
         }
     }
 }
@@ -1412,16 +1424,12 @@ private enum KioskDoorbellStationResolver {
             }
         )
 
-        let stationId: String
-        if let requestedStation {
-            stationId = requestedStation
-        } else if let triggerStation {
-            stationId = triggerStation
-        } else if fallbackStations.count == 1, let onlyStation = fallbackStations.first {
-            stationId = onlyStation
-        } else {
-            throw ResolveError.stationMissing(payload.diagnosticSummary)
-        }
+        let stationId = try chooseStationId(
+            requestedStation: requestedStation,
+            triggerStation: triggerStation,
+            fallbackStations: fallbackStations,
+            diagnosticSummary: payload.diagnosticSummary
+        )
 
         let stationEntities = entities.filter { labels(for: $0).contains(stationId) }
         guard !stationEntities.isEmpty else {
@@ -1457,11 +1465,7 @@ private enum KioskDoorbellStationResolver {
         // carries video/remote audio and exposes the G.722 speaker backchannel.
         let intercomTargetEntityId = intercomMarker.map { _ in camera.entityId }
 
-        if let intercomMarker, intercomMarker.entityId != camera.entityId {
-            Current.Log.info(
-                "Doorbell intercom marker \(intercomMarker.entityId) routed to camera WebRTC target \(camera.entityId)"
-            )
-        }
+        logIntercomRoutingIfNeeded(marker: intercomMarker, cameraEntityId: camera.entityId)
 
         let stationTimeout = stationEntities
             .filter {
@@ -1515,13 +1519,7 @@ private enum KioskDoorbellStationResolver {
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
 
-        let trimmedDoorbellName = doorbell?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayName: String
-        if let trimmedDoorbellName, !trimmedDoorbellName.isEmpty {
-            displayName = trimmedDoorbellName
-        } else {
-            displayName = humanizedStationName(stationId)
-        }
+        let displayName = resolvedStationDisplayName(doorbell?.name, stationId: stationId)
 
         return KioskDoorbellStation(
             id: stationId,
@@ -1532,6 +1530,42 @@ private enum KioskDoorbellStationResolver {
             intercomTargetEntityId: intercomTargetEntityId,
             timeoutEntityId: timeoutEntity?.entityId,
             openers: openers
+        )
+    }
+
+    private static func chooseStationId(
+        requestedStation: String?,
+        triggerStation: String?,
+        fallbackStations: Set<String>,
+        diagnosticSummary: String
+    ) throws -> String {
+        if let requestedStation {
+            return requestedStation
+        }
+        if let triggerStation {
+            return triggerStation
+        }
+        if fallbackStations.count == 1, let onlyStation = fallbackStations.first {
+            return onlyStation
+        }
+        throw ResolveError.stationMissing(diagnosticSummary)
+    }
+
+    private static func resolvedStationDisplayName(_ name: String?, stationId: String) -> String {
+        let trimmedDoorbellName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedDoorbellName, !trimmedDoorbellName.isEmpty {
+            return trimmedDoorbellName
+        }
+        return humanizedStationName(stationId)
+    }
+
+    private static func logIntercomRoutingIfNeeded(
+        marker: EntityRegistryListForDisplay.Entity?,
+        cameraEntityId: String
+    ) {
+        guard let marker, marker.entityId != cameraEntityId else { return }
+        Current.Log.info(
+            "Doorbell intercom marker \(marker.entityId) routed to camera WebRTC target \(cameraEntityId)"
         )
     }
 
@@ -1797,7 +1831,7 @@ private struct KioskDoorbellConfigurationErrorView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 24) {
-                Image(systemName: "bell.slash.fill")
+                Image(systemSymbol: .bellSlashFill)
                     .font(.system(size: 72, weight: .bold))
                     .foregroundStyle(.orange)
 
@@ -1816,7 +1850,7 @@ private struct KioskDoorbellConfigurationErrorView: View {
                     .foregroundStyle(.secondary)
 
                 Button(action: dismiss) {
-                    Label("Schließen", systemImage: "xmark.circle.fill")
+                    Label("Schließen", systemSymbol: .xmarkCircleFill)
                         .font(.system(size: 22, weight: .bold))
                         .frame(maxWidth: 320)
                         .padding(.vertical, 12)
@@ -1862,14 +1896,14 @@ private struct KioskDoorbellView: View {
 
             VStack(spacing: 16) {
                 HStack(spacing: 10) {
-                    Image(systemName: "bell.fill")
+                    Image(systemSymbol: .bellFill)
                     Text(station.name)
                         .font(.title2.bold())
                     Spacer()
                     Button {
                         hangUp()
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
+                        Image(systemSymbol: .xmarkCircleFill)
                             .font(.title)
                     }
                     .buttonStyle(.plain)
@@ -1882,7 +1916,7 @@ private struct KioskDoorbellView: View {
                             Button {
                                 pendingOpener = opener
                             } label: {
-                                Label(opener.buttonTitle, systemImage: opener.systemImage)
+                                Label(opener.buttonTitle, systemSymbol: opener.systemSymbol)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 10)
                             }
@@ -1898,7 +1932,7 @@ private struct KioskDoorbellView: View {
                     } label: {
                         Label(
                             isMicrophoneEnabled ? "Mikrofon EIN" : "Mikrofon AUS",
-                            systemImage: isMicrophoneEnabled ? "mic.fill" : "mic.slash.fill"
+                            systemSymbol: isMicrophoneEnabled ? .micFill : .micSlashFill
                         )
                         .font(.system(size: 20, weight: .bold))
                         .frame(maxWidth: .infinity)
@@ -1912,7 +1946,7 @@ private struct KioskDoorbellView: View {
                     Button {
                         hangUp()
                     } label: {
-                        Label("Auflegen", systemImage: "phone.down.fill")
+                        Label("Auflegen", systemSymbol: .phoneDownFill)
                             .font(.system(size: 20, weight: .bold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)

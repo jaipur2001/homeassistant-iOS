@@ -1262,18 +1262,10 @@ public final class CameraRTSPServer {
             var accessUnit = Data()
 
             if isKeyframe {
-                if let sps {
+                // Preserve SPS then PPS ordering when preparing each keyframe.
+                for parameterSet in [sps, pps].compactMap({ $0 }) {
                     appendRTPPackets(
-                        for: sps,
-                        timestamp: timestamp,
-                        markerOnLastPacket: false,
-                        client: client,
-                        to: &accessUnit
-                    )
-                }
-                if let pps {
-                    appendRTPPackets(
-                        for: pps,
+                        for: parameterSet,
                         timestamp: timestamp,
                         markerOnLastPacket: false,
                         client: client,
