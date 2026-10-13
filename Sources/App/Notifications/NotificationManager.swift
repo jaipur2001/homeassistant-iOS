@@ -1086,7 +1086,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 }
 
-private struct KioskDoorbellPayload {
+struct KioskDoorbellPayload {
     let stationId: String?
     let triggerEntityId: String?
     let diagnosticSummary: String
