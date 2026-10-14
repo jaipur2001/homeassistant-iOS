@@ -1,1 +1,3 @@
-trigger: build78-jabra-audio-route
+trigger: kiosk79-ci44-green-build
+source_commit: 5928924ed8dd9847e1767ddda2847b38d40ab047
+candidate: 79
