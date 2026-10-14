@@ -27,6 +27,7 @@ Geltungsbereich: `jaipur2001/homeassistant-iOS`, insbesondere Kiosk-/Doorbell-In
 | CI #35 | 7 fehlgeschlagene Testfälle in ZoneManager und App-Shortcut-Tests; Xcode-Simulator-Diagnose dauerte weitere 600 s | Gemeinsam genutzten `Current`-Zustand aufräumen; betroffene Suites zuerst isolieren |
 | CI #36 | YamlLint fehlgeschlagen: Zeile mit 127 Zeichen bei Grenzwert 120 | Vor jedem Workflow-Commit YamlLint und Zeilenlänge kontrollieren |
 | CI #37 | Diagnosegruppen erfolgreich: Zone 12/12, Shortcuts 6/6, kombiniert 18/18 bei abgeschalteter Xcode-Parallelisierung | Gezielte Diagnose validiert die Fälle, ersetzt aber weder vollständigen Unit-Testlauf noch Coverage-Messung |
+| CI #41 | Alle Unit-Tests und statischen Checks erfolgreich; Patch Coverage 89,59 % (284/317) knapp unter 90 % | Drei bislang ungetestete Zeilen der AVCC/H.264-Längenfeldverarbeitung gezielt mit gültigen und defekten NAL-Paketen abdecken, Coverage-Grenze unverändert lassen |
 | CI #38 | 4.506 Unit-Tests, nur `AppIconShortcutItemsUpdaterTests.resolvesNameAndArea()` fehlgeschlagen. Test wartete lediglich auf einen beliebigen Shortcut und las den zuvor gesetzten `test.pending`-Platzhalter. Zusätzlich 600 s Simulator-Sysdiagnose | Asynchrone Tests müssen auf **die erwartete Identität und den erwarteten Inhalt** warten, nicht auf `isEmpty == false`; Xcode-Diagnose mit `-collect-test-diagnostics never` abschalten |
 
 ## Unverzichtbarer Preflight vor jedem Code-Commit

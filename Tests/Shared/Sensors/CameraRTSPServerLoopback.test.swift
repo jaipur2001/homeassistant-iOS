@@ -134,5 +134,26 @@ final class CameraRTSPServerLoopbackTests: XCTestCase {
         XCTAssertEqual(server.debugSendingClientCount, 0)
         XCTAssertEqual(server.debugStalledSendDisconnects, 0)
     }
+
+    func testAVCCNALUnitsExtractsTwoLengthPrefixedFrames() {
+        let bytes = Data([
+            0, 0, 0, 4, 0x67, 0x42, 0xE0, 0x1F,
+            0, 0, 0, 3, 0x65, 0x88, 0x84,
+        ])
+
+        XCTAssertEqual(
+            CameraRTSPServer.nalUnits(from: bytes),
+            [
+                Data([0x67, 0x42, 0xE0, 0x1F]),
+                Data([0x65, 0x88, 0x84]),
+            ]
+        )
+    }
+
+    func testAVCCNALUnitsRejectsZeroLengthAndTruncatedFrames() {
+        XCTAssertTrue(CameraRTSPServer.nalUnits(from: Data([0, 0, 0, 0])).isEmpty)
+        XCTAssertTrue(CameraRTSPServer.nalUnits(from: Data([0, 0, 0, 4, 0x65])).isEmpty)
+        XCTAssertTrue(CameraRTSPServer.nalUnits(from: Data([0, 0, 0])).isEmpty)
+    }
 }
 #endif

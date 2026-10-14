@@ -1230,6 +1230,11 @@ public final class CameraRTSPServer {
         guard status == noErr, let dataPointer else { return nil }
 
         let bytes = Data(bytes: dataPointer, count: totalLength)
+        return nalUnits(from: bytes)
+    }
+
+    /// Parses the AVCC length-prefixed NAL units handed over by VideoToolbox.
+    static func nalUnits(from bytes: Data) -> [Data] {
         var offset = 0
         var nalUnits: [Data] = []
 
