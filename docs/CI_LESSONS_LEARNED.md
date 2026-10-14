@@ -28,6 +28,7 @@ Geltungsbereich: `jaipur2001/homeassistant-iOS`, insbesondere Kiosk-/Doorbell-In
 | CI #36 | YamlLint fehlgeschlagen: Zeile mit 127 Zeichen bei Grenzwert 120 | Vor jedem Workflow-Commit YamlLint und Zeilenlänge kontrollieren |
 | CI #37 | Diagnosegruppen erfolgreich: Zone 12/12, Shortcuts 6/6, kombiniert 18/18 bei abgeschalteter Xcode-Parallelisierung | Gezielte Diagnose validiert die Fälle, ersetzt aber weder vollständigen Unit-Testlauf noch Coverage-Messung |
 | CI #41 | Alle Unit-Tests und statischen Checks erfolgreich; Patch Coverage 89,59 % (284/317) knapp unter 90 % | Drei bislang ungetestete Zeilen der AVCC/H.264-Längenfeldverarbeitung gezielt mit gültigen und defekten NAL-Paketen abdecken, Coverage-Grenze unverändert lassen |
+| CI #42 | SwiftLint und SwiftFormat grün, 4.508/4.509 Unit-Tests bestanden; der WebView-Render-Test wartete 5 s auf WKWebView und schlug fehl, während eine relative Bildressource von `example.com` geladen werden konnte | WebKit-Tests mit Inline-SVG offline gestalten, damit `isLoading` nicht von Netzwerkzugriffen abhängt; Coverage nach bestandenem Testlauf messen |
 | CI #38 | 4.506 Unit-Tests, nur `AppIconShortcutItemsUpdaterTests.resolvesNameAndArea()` fehlgeschlagen. Test wartete lediglich auf einen beliebigen Shortcut und las den zuvor gesetzten `test.pending`-Platzhalter. Zusätzlich 600 s Simulator-Sysdiagnose | Asynchrone Tests müssen auf **die erwartete Identität und den erwarteten Inhalt** warten, nicht auf `isEmpty == false`; Xcode-Diagnose mit `-collect-test-diagnostics never` abschalten |
 
 ## Unverzichtbarer Preflight vor jedem Code-Commit
@@ -118,3 +119,12 @@ nach jedem Test zuverlässig auf den vorherigen Zustand zurückgesetzt werden.
   regulären Coverage-Datei aus erfolgreich abgeschlossenen Tests.
 - `CI success` ist erst dann wahr, wenn die vollständige Testsuite und die
   tatsächliche 90-%-Patch-Coverage-Prüfung erfolgreich sind.
+
+## CI #42: Offline-WebKit-Fixtures
+
+Eine Testseite mit `<img src="icon.png">` und einer HTTPS-`baseURL` kann beim
+`loadHTMLString` echte Netzwerkanfragen auslösen. Wird gleichzeitig auf das Ende
+von `WKWebView.isLoading` gewartet, hängt der Test ungewollt von externen
+Ressourcen ab. Für die Render-Erkennung deshalb lokal eingebettete HTML-/SVG-
+Inhalte verwenden, auch in anderen WebView-Tests. Kein pauschales Erhöhen der
+Timeouts und keine Deaktivierung der inhaltlichen Assertion.
