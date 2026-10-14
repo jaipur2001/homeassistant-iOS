@@ -504,7 +504,6 @@ extension CameraStreamServer: MotionDetectionObserver {
     public func motionStateDidChange(for manager: MotionDetectionManager) {}
 }
 
-
 // MARK: - H.264 / RTSP server
 
 /// Low-latency H.264 RTSP server for the kiosk front camera.
@@ -557,8 +556,8 @@ public final class CameraRTSPServer {
     private var pps: Data?
 
     private static let payloadType: UInt8 = 96
-    private static let rtpClockRate: Int32 = 90_000
-    private static let maxRTPPayload = 1_200
+    private static let rtpClockRate: Int32 = 90000
+    private static let maxRTPPayload = 1200
     private static let rtpSendTimeout: TimeInterval = 5
     private static let tcpKeepaliveIdle = 10
     private static let tcpKeepaliveInterval = 5
@@ -598,11 +597,11 @@ public final class CameraRTSPServer {
     }
 
     public var debugPlayingClientCount: Int {
-        queue.sync { clients.values.filter { $0.playing }.count }
+        queue.sync { clients.values.filter(\.playing).count }
     }
 
     public var debugSendingClientCount: Int {
-        queue.sync { clients.values.filter { $0.sendInFlight }.count }
+        queue.sync { clients.values.filter(\.sendInFlight).count }
     }
 
     public var debugStalledSendDisconnects: Int {
@@ -726,7 +725,10 @@ public final class CameraRTSPServer {
     }
 
     private func receive(on client: Client) {
-        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self, weak client] data, _, isComplete, error in
+        client.connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: 16384
+        ) { [weak self, weak client] data, _, isComplete, error in
             guard let self, let client else { return }
 
             queue.async {
@@ -763,7 +765,7 @@ public final class CameraRTSPServer {
 
                 let payloadLength =
                     (Int(client.receiveBuffer[2]) << 8)
-                    | Int(client.receiveBuffer[3])
+                        | Int(client.receiveBuffer[3])
                 let frameLength = 4 + payloadLength
 
                 guard client.receiveBuffer.count >= frameLength else { return }
@@ -858,7 +860,7 @@ public final class CameraRTSPServer {
                     "RTP-Info": "url=\(requestURL)/trackID=0;seq=\(client.sequence);rtptime=0",
                 ]
             )
-            Current.Log.info("Camera RTSP: PLAY (\(clients.values.filter { $0.playing }.count) clients)")
+            Current.Log.info("Camera RTSP: PLAY (\(clients.values.filter(\.playing).count) clients)")
 
         case "GET_PARAMETER":
             sendResponse(
@@ -1123,12 +1125,7 @@ public final class CameraRTSPServer {
     }
 
     private static let compressionOutputCallback: VTCompressionOutputCallback = {
-        outputCallbackRefCon,
-        _,
-        status,
-        _,
-        sampleBuffer
-        in
+        outputCallbackRefCon, _, status, _, sampleBuffer in
         guard status == noErr,
               let outputCallbackRefCon,
               let sampleBuffer,
@@ -1233,15 +1230,20 @@ public final class CameraRTSPServer {
         guard status == noErr, let dataPointer else { return nil }
 
         let bytes = Data(bytes: dataPointer, count: totalLength)
+        return nalUnits(from: bytes)
+    }
+
+    /// Parses the AVCC length-prefixed NAL units handed over by VideoToolbox.
+    static func nalUnits(from bytes: Data) -> [Data] {
         var offset = 0
         var nalUnits: [Data] = []
 
         while offset + 4 <= bytes.count {
             let nalLength =
                 (Int(bytes[offset]) << 24)
-                | (Int(bytes[offset + 1]) << 16)
-                | (Int(bytes[offset + 2]) << 8)
-                | Int(bytes[offset + 3])
+                    | (Int(bytes[offset + 1]) << 16)
+                    | (Int(bytes[offset + 2]) << 8)
+                    | Int(bytes[offset + 3])
 
             offset += 4
 
@@ -1262,18 +1264,10 @@ public final class CameraRTSPServer {
             var accessUnit = Data()
 
             if isKeyframe {
-                if let sps {
+                // Preserve SPS then PPS ordering when preparing each keyframe.
+                for parameterSet in [sps, pps].compactMap({ $0 }) {
                     appendRTPPackets(
-                        for: sps,
-                        timestamp: timestamp,
-                        markerOnLastPacket: false,
-                        client: client,
-                        to: &accessUnit
-                    )
-                }
-                if let pps {
-                    appendRTPPackets(
-                        for: pps,
+                        for: parameterSet,
                         timestamp: timestamp,
                         markerOnLastPacket: false,
                         client: client,
@@ -1317,25 +1311,40 @@ public final class CameraRTSPServer {
                 self.remove(client: client)
             }
 
-            client.connection.send(content: accessUnit, completion: .contentProcessed { [weak self, weak client] error in
-                guard let self, let client else { return }
-                queue.async {
-                    guard let currentClient = self.clients[identifier],
-                          currentClient === client,
-                          client.sendGeneration == sendGeneration else {
-                        return
-                    }
+            client.connection.send(
+                content: accessUnit,
+                completion: .contentProcessed { [weak self, weak client] error in
+                    guard let self, let client else { return }
+                    queue.async {
+                        guard let currentClient = self.clients[identifier],
+                              currentClient === client,
+                              client.sendGeneration == sendGeneration else {
+                            return
+                        }
 
-                    client.sendInFlight = false
+                        client.sendInFlight = false
 
-                    if let error {
-                        Current.Log.warning("Camera RTSP: RTP send failed: \(error)")
-                        self.remove(client: client)
+                        if let error {
+                            Current.Log.warning("Camera RTSP: RTP send failed: \(error)")
+                            self.remove(client: client)
+                        }
                     }
                 }
-            })
+            )
         }
     }
+
+    #if DEBUG
+    /// Injects an encoded access unit through the real RTSP transport for loopback tests.
+    /// The server still owns and serializes all client/packet state on its normal queue.
+    func testBroadcast(nalUnits: [Data], sps: Data?, pps: Data?, isKeyframe: Bool) {
+        queue.sync {
+            self.sps = sps
+            self.pps = pps
+            broadcast(nalUnits: nalUnits, timestamp: 90000, isKeyframe: isKeyframe)
+        }
+    }
+    #endif
 
     private func appendRTPPackets(
         for nalUnit: Data,
@@ -1448,7 +1457,6 @@ public class CameraStreamServer {
 
     public func setActive(_ newValue: Bool) {}
 }
-
 
 public final class CameraRTSPServer {
     public var port: Int = 8555

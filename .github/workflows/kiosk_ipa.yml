@@ -1,3 +1,5 @@
+# Shell blocks contain long, intentionally unsplit signing/packaging commands.
+# yamllint disable rule:line-length
 name: Kiosk IPA Build
 
 on:
@@ -103,15 +105,15 @@ jobs:
 
           // Upstream uses ".HomeAssistant". Our registered App ID is lower-case.
           PRODUCT_BUNDLE_IDENTIFIER = $(BUNDLE_ID_PREFIX).homeassistant$(BUNDLE_ID_SUFFIX)$(PROVISIONING_SUFFIX)
-          
+
           CODE_SIGN_STYLE_DEFAULT = Manual
           CODE_SIGN_IDENTITY = Apple Development
-          
+
           // Profile names are read from the actual .mobileprovision files later
           // and supplied to xcodebuild as KIOSK_* build settings.
           PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_App = $(KIOSK_MAIN_PROFILE_NAME)
           PROVISIONING_PROFILE_SPECIFIER_QKSPJURFCD_Extensions_NotificationService = $(KIOSK_NSE_PROFILE_NAME)
-          
+
           ENABLE_CRITICAL_ALERTS_QKSPJURFCD = 0
           ENABLE_PUSH_PROVIDER_QKSPJURFCD = 0
           ENABLE_DEVICE_NAME_QKSPJURFCD = 0
@@ -1365,4 +1367,3 @@ jobs:
           fi
 
           rm -rf "$RUNNER_TEMP/kiosk-package-signing"
-

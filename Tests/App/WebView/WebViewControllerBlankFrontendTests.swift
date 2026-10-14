@@ -43,7 +43,11 @@ final class WebViewControllerBlankFrontendTests: XCTestCase {
     func testRenderProbeReportsRenderedForAPageWithContent() async throws {
         let sut = makeSUT()
         let baseURL = try XCTUnwrap(URL(string: "https://example.com/lovelace/0"))
-        sut.webView.loadHTMLString("<html><body><img src=\"icon.png\"></body></html>", baseURL: baseURL)
+        // Inline SVG avoids a network fetch that could keep WKWebView loading indefinitely.
+        sut.webView.loadHTMLString(
+            "<html><body><svg><rect width='12' height='12'/></svg></body></html>",
+            baseURL: baseURL
+        )
         await waitUntil { sut.webView.url != nil && !sut.webView.isLoading }
 
         let hasRendered = await sut.hasRenderedFrontend()
@@ -253,7 +257,10 @@ final class WebViewControllerBlankFrontendTests: XCTestCase {
         let sut = makeSUT()
         sut.overlayState = WebFrontendOverlayState()
         let baseURL = try XCTUnwrap(URL(string: "https://home.local/lovelace/0"))
-        sut.webView.loadHTMLString("<html><body><img src=\"icon.png\"></body></html>", baseURL: baseURL)
+        sut.webView.loadHTMLString(
+            "<html><body><svg><rect width='12' height='12'/></svg></body></html>",
+            baseURL: baseURL
+        )
         await waitUntil { sut.webView.url?.path == "/lovelace/0" }
 
         sut.webViewWebContentProcessDidTerminate(sut.webView)

@@ -32,6 +32,7 @@ final class MockClientEventStore: ClientEventStoreProtocol {
 class ZoneManagerTests: XCTestCase {
     private var database: DatabaseQueue!
     private var previousDatabase: (() -> DatabaseQueue)!
+    private var restoreGlobals: (() -> Void)?
     private var collector: FakeCollector!
     private var processor: FakeProcessor!
     private var regionFilter: FakeRegionFilter!
@@ -50,6 +51,24 @@ class ZoneManagerTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+
+        let oldServers = Current.servers
+        let oldCachedApis = Current.cachedApis
+        let oldClientEventStore = Current.clientEventStore
+        let oldNetworkState = Current.connectivity.currentNetworkState
+        let oldOneShotLocation = Current.location.oneShotLocation
+        let oldZoneEnabled = Current.settingsStore.locationSources.zone
+        let oldSignificantLocationChange = Current.settingsStore.locationSources.significantLocationChange
+
+        restoreGlobals = {
+            Current.servers = oldServers
+            Current.cachedApis = oldCachedApis
+            Current.clientEventStore = oldClientEventStore
+            Current.connectivity.currentNetworkState = oldNetworkState
+            Current.location.oneShotLocation = oldOneShotLocation
+            Current.settingsStore.locationSources.zone = oldZoneEnabled
+            Current.settingsStore.locationSources.significantLocationChange = oldSignificantLocationChange
+        }
 
         Current.settingsStore.locationSources.zone = true
         Current.settingsStore.locationSources.significantLocationChange = true
@@ -79,8 +98,10 @@ class ZoneManagerTests: XCTestCase {
     }
 
     override func tearDown() {
-        Current.database = previousDatabase
         Current.clientEventStore.clearAllEvents()
+        Current.database = previousDatabase
+        restoreGlobals?()
+        restoreGlobals = nil
 
         super.tearDown()
     }

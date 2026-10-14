@@ -2,23 +2,26 @@
 @testable import Shared
 import SwiftUI
 import Testing
-import UIKit
 
 // Serialized: the tests swap `Current.isCatalyst`, which concurrent tests would race on.
 @Suite(.serialized)
 struct NotificationSettingsViewTests {
     @MainActor
-    @Test func rendersWithForceCloseWarningRow() {
+    @Test func buildsContentAndIndexesForceCloseWarningRowOnIOS() {
         withCatalyst(false) {
-            render(NavigationView { NotificationSettingsView() })
+            // Exercise the view builder without presenting a real window or triggering onAppear.
+            _ = NotificationSettingsView().body
+            let titles = NotificationSettingsView.settingsSearchEntries.map(\.title)
+            #expect(titles.contains(L10n.SettingsDetails.Notifications.ForceCloseWarning.title))
         }
     }
 
     @MainActor
-    @Test func rendersWithoutForceCloseWarningRowOnCatalyst() {
-        // The manager never fires on Catalyst, so the row — and its search entry — go away with it.
+    @Test func buildsContentWithoutForceCloseWarningRowOnCatalyst() {
         withCatalyst(true) {
-            render(NavigationView { NotificationSettingsView() })
+            _ = NotificationSettingsView().body
+            let titles = NotificationSettingsView.settingsSearchEntries.map(\.title)
+            #expect(!titles.contains(L10n.SettingsDetails.Notifications.ForceCloseWarning.title))
         }
     }
 
@@ -42,23 +45,5 @@ struct NotificationSettingsViewTests {
         Current.isCatalyst = isCatalyst
         defer { Current.isCatalyst = previous }
         try body()
-    }
-
-    /// Lays the view out in a window, which is what makes SwiftUI evaluate the body.
-    ///
-    /// Deliberately never becomes the key window: the snapshot helpers draw into whatever window is
-    /// key, so stealing it here would reach into unrelated tests. The window is torn down again for
-    /// the same reason.
-    @MainActor
-    private func render(_ view: some View) {
-        let controller = UIHostingController(rootView: view)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-        window.rootViewController = controller
-        window.isHidden = false
-        controller.view.setNeedsLayout()
-        controller.view.layoutIfNeeded()
-
-        window.isHidden = true
-        window.rootViewController = nil
     }
 }

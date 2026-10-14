@@ -1,4 +1,5 @@
 import Alamofire
+import Combine
 import GRDB
 @testable import HomeAssistant
 @testable import Shared
@@ -82,6 +83,96 @@ final class WebViewControllerTests: XCTestCase {
     /// Going back to a page WebKit kept in its page cache restarts the stand-by loader, but the restored
     /// frontend already fired its one and only `frontend/loaded` and never fires it again, so the restore
     /// itself has to report the frontend as loaded or the loader covers a working page forever.
+    /// A page that loaded while the scene was away is still waiting for its `config/get` reply, and nothing
+    /// else would make the frontend ask again.
+    func testBecomingActiveDeliversFrontendMessagesHeldInTheBackground() {
+        let sut = makeSUT()
+        let externalMessageHandler = MockWebViewExternalMessageHandler()
+        sut.webViewExternalMessageHandler = externalMessageHandler
+        let scriptMessageHandler = sut.webViewScriptMessageHandler
+        scriptMessageHandler.isAppInBackground = { true }
+        scriptMessageHandler.handle(messageName: "externalBus", messageBody: ["id": 1, "type": "config/get"])
+
+        scriptMessageHandler.isAppInBackground = { false }
+        sut.handleSceneDidActivate()
+
+        XCTAssertEqual(externalMessageHandler.handledExternalMessages.map { $0["type"] as? String }, ["config/get"])
+    }
+
+    /// Only a return from the background tells the host: dismissing a system alert activates the scene without
+    /// it having been away.
+    func testBecomingActiveTellsTheHostOnlyWhenTheSceneReturnsFromTheBackground() {
+        let sut = makeSUT()
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        var returns = 0
+        let subscription = overlayState.sceneReturnedFromBackground.sink { returns += 1 }
+        defer { subscription.cancel() }
+
+        sut.handleSceneDidActivate()
+        XCTAssertEqual(returns, 0)
+
+        sut.handleSceneDidEnterBackground()
+        sut.handleSceneDidActivate()
+        XCTAssertEqual(returns, 1)
+    }
+
+    /// Scene events from other objects must not disturb the iPad frontend. Real scene notifications
+    /// must resume the deferred WebSocket message bus after an actual background transition.
+    func testSceneNotificationsResumeFrontendOnlyAfterRealBackgroundEvent() throws {
+        let sut = makeSUT()
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first)
+        let background = Notification(name: UIScene.didEnterBackgroundNotification, object: scene)
+        let activated = Notification(name: UIScene.didActivateNotification, object: scene)
+        var foregroundReturns = 0
+        let subscription = overlayState.sceneReturnedFromBackground.sink { foregroundReturns += 1 }
+        defer { subscription.cancel() }
+
+        // Ignore notifications not originating from a real scene.
+        sut.sceneDidEnterBackground(Notification(name: UIScene.didEnterBackgroundNotification, object: NSObject()))
+        XCTAssertFalse(sut.didEnterBackgroundSinceLastActivation)
+
+        sut.sceneDidEnterBackground(background)
+        XCTAssertTrue(sut.didEnterBackgroundSinceLastActivation)
+        sut.sceneDidActivate(activated)
+
+        XCTAssertFalse(sut.didEnterBackgroundSinceLastActivation)
+        XCTAssertEqual(foregroundReturns, 1)
+    }
+
+    /// Re-arming the grace timer only happens after the scene really went to the background, and
+    /// only for a frontend which has not finished loading.
+    func testReturningFromBackgroundRearmsPendingDisconnectedGraceTimer() {
+        let sut = makeSUT()
+        sut.connectionState = .disconnected
+        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { _ in }
+        let previousTimer = sut.emptyStateTimer
+        defer { sut.emptyStateTimer?.invalidate() }
+
+        sut.handleSceneDidEnterBackground()
+        sut.handleSceneDidActivate()
+
+        XCTAssertFalse(previousTimer?.isValid ?? true)
+        XCTAssertTrue(sut.emptyStateTimer?.isValid ?? false)
+        XCTAssertFalse(previousTimer === sut.emptyStateTimer)
+    }
+
+    func testActivatingAlreadyLoadedFrontendPreservesExistingGraceTimer() {
+        let sut = makeSUT()
+        sut.connectionState = .loaded
+        sut.emptyStateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: false) { _ in }
+        let previousTimer = sut.emptyStateTimer
+        defer { sut.emptyStateTimer?.invalidate() }
+
+        sut.handleSceneDidEnterBackground()
+        sut.handleSceneDidActivate()
+
+        XCTAssertTrue(previousTimer?.isValid ?? false)
+        XCTAssertTrue(previousTimer === sut.emptyStateTimer)
+    }
+
     func testFrontendRestoredFromPageCacheReportsLoaded() {
         let sut = makeSUT()
         let overlayState = WebFrontendOverlayState()
@@ -382,8 +473,21 @@ final class WebViewControllerTests: XCTestCase {
         }
     }
 
-    func testServerErrorResponseDecisionAllowsClientErrorsToRender() {
-        for statusCode in [400, 401, 403, 404, 429] {
+    func testServerErrorResponseDecisionRedirectsNotFoundAndForbiddenToRoot() {
+        for statusCode in [403, 404, 410] {
+            let decision = WebViewController.decisionForMainFrameErrorResponse(
+                statusCode: statusCode,
+                responseURL: URL(string: "https://example.com/lovelace/removed"),
+                initialURL: nil,
+                cfMitigated: nil
+            )
+
+            XCTAssertEqual(decision, .redirectToRoot, "expected redirect to root for HTTP \(statusCode)")
+        }
+    }
+
+    func testServerErrorResponseDecisionAllowsAuthAndRateLimitClientErrorsToRender() {
+        for statusCode in [400, 401, 429] {
             let decision = WebViewController.decisionForMainFrameErrorResponse(
                 statusCode: statusCode,
                 responseURL: URL(string: "https://example.com/lovelace"),
@@ -393,6 +497,128 @@ final class WebViewControllerTests: XCTestCase {
 
             XCTAssertEqual(decision, .allow, "expected allow for HTTP \(statusCode)")
         }
+    }
+
+    func testNavigationErrorRedirectsToRootOnlyForMalformedURLs() {
+        let redirecting: [Error] = [
+            URLError(.badURL),
+            URLError(.unsupportedURL),
+            NSError(domain: "WebKitErrorDomain", code: 101),
+        ]
+        for error in redirecting {
+            XCTAssertTrue(
+                WebViewController.shouldRedirectToRootForNavigationError(error),
+                "expected redirect for \(error)"
+            )
+        }
+
+        let notRedirecting: [Error] = [
+            URLError(.cannotConnectToHost),
+            URLError(.notConnectedToInternet),
+            URLError(.timedOut),
+            URLError(.cancelled),
+            NSError(domain: "WebKitErrorDomain", code: 102),
+            NSError(domain: "OtherDomain", code: 999),
+        ]
+        for error in notRedirecting {
+            XCTAssertFalse(
+                WebViewController.shouldRedirectToRootForNavigationError(error),
+                "expected no redirect for \(error)"
+            )
+        }
+    }
+
+    func testRootRedirectOutcomeLoadsRootWhenADifferentPageFailed() throws {
+        let target = try XCTUnwrap(URL(string: "https://example.com/lovelace?external_auth=1"))
+        let failed = try XCTUnwrap(URL(string: "https://example.com/lovelace/removed"))
+
+        XCTAssertEqual(WebViewController.rootRedirectOutcome(target: target, failedURL: failed), .loadRoot(target))
+        XCTAssertEqual(WebViewController.rootRedirectOutcome(target: target, failedURL: nil), .loadRoot(target))
+    }
+
+    func testRootRedirectOutcomeShowsEmptyStateWhenRootItselfFailed() throws {
+        let target = try XCTUnwrap(URL(string: "https://example.com/lovelace?external_auth=1"))
+        // Same page, different query - the root itself is the page that failed.
+        let failed = try XCTUnwrap(URL(string: "https://example.com/lovelace"))
+
+        XCTAssertEqual(
+            WebViewController.rootRedirectOutcome(target: target, failedURL: failed),
+            .showEmptyState(failedURL: failed)
+        )
+    }
+
+    /// A configured `https://host` root (path "") and the canonical `https://host/` the redirect produces
+    /// are the same page, so a failure at the root must stop rather than reload it forever.
+    func testRootRedirectOutcomeShowsEmptyStateWhenCanonicalRootSpellingFailed() throws {
+        let target = try XCTUnwrap(URL(string: "https://example.com?external_auth=1"))
+        let failed = try XCTUnwrap(URL(string: "https://example.com/"))
+
+        XCTAssertEqual(
+            WebViewController.rootRedirectOutcome(target: target, failedURL: failed),
+            .showEmptyState(failedURL: failed)
+        )
+    }
+
+    func testMainFrameNotFoundResponseRedirectsToRootWithoutEmptyState() throws {
+        let sut = makeSUT()
+        sut.webView = WKWebView(frame: .zero)
+        sut.overlayState = WebFrontendOverlayState()
+        var decision: WKNavigationResponsePolicy?
+
+        try sut.webView(WKWebView(), decidePolicyFor: FakeNavigationResponse(statusCode: 404)) { decision = $0 }
+
+        // The response is cancelled and no error screen is shown - the redirect takes over instead.
+        XCTAssertEqual(decision, .cancel)
+        XCTAssertNil(sut.overlayState?.emptyState)
+    }
+
+    func testProvisionalNavigationFailureForMalformedURLRedirectsInsteadOfShowingError() {
+        let sut = makeSUT()
+        sut.webView = WKWebView(frame: .zero)
+        sut.overlayState = WebFrontendOverlayState()
+
+        sut.webView(WKWebView(), didFailProvisionalNavigation: nil, withError: URLError(.unsupportedURL))
+
+        // The malformed-URL branch redirects to root rather than recording the error for the empty state.
+        XCTAssertNil(sut.latestLoadError)
+    }
+
+    func testCommittedNavigationFailureForMalformedURLRedirectsInsteadOfShowingError() {
+        let sut = makeSUT()
+        sut.webView = WKWebView(frame: .zero)
+        sut.overlayState = WebFrontendOverlayState()
+
+        sut.webView(WKWebView(), didFail: nil, withError: URLError(.badURL))
+
+        XCTAssertNil(sut.latestLoadError)
+    }
+
+    func testRedirectToActiveURLRootLoadsTheFrontendRoot() async throws {
+        let sut = makeSUT()
+        sut.webView = WKWebView(frame: .zero)
+        sut.overlayState = WebFrontendOverlayState()
+        let resolvedRoot = await sut.server.webviewURL()
+        let root = try XCTUnwrap(resolvedRoot)
+
+        sut.redirectToActiveURLRoot(failedURL: root.appendingPathComponent("lovelace/removed"))
+
+        await waitUntil { sut.webView.url != nil }
+        XCTAssertEqual(sut.webView.url?.host, root.host)
+    }
+
+    func testRedirectToActiveURLRootShowsEmptyStateWhenRootItselfFailed() async throws {
+        let sut = makeSUT()
+        sut.webView = WKWebView(frame: .zero)
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        let resolvedRoot = await sut.server.webviewURL()
+        let root = try XCTUnwrap(resolvedRoot)
+
+        sut.redirectToActiveURLRoot(failedURL: root)
+
+        await waitUntil { overlayState.emptyState != nil }
+        // The loop guard stopped us from navigating back into the page that just failed.
+        XCTAssertNil(sut.webView.url)
     }
 
     func testServerErrorResponseDecisionAllowsCloudflareChallengeToRender() {
@@ -941,6 +1167,48 @@ final class WebViewControllerTests: XCTestCase {
         XCTAssertTrue(sut.prefersStatusBarHidden)
     }
 
+    /// Hiding the status bar leaves no room for a themed strip to fill, whichever setting asked for it.
+    func testThemedStatusBarStripIsDroppedWhenKioskHidesTheStatusBar() async throws {
+        let previousDatabase = Current.database
+        let previousKiosk = Current.kiosk
+        let previousSensors = Current.sensors
+        let previousFullScreen = Current.settingsStore.fullScreen
+        let previousBelowStatusBar = Current.settingsStore.webViewAlwaysBelowStatusBar
+        defer {
+            Current.database = previousDatabase
+            Current.kiosk = previousKiosk
+            Current.sensors = previousSensors
+            Current.settingsStore.fullScreen = previousFullScreen
+            Current.settingsStore.webViewAlwaysBelowStatusBar = previousBelowStatusBar
+        }
+        Current.sensors = SensorContainer()
+
+        let database = try DatabaseQueue()
+        try KioskSettingsTable().createIfNeeded(database: database)
+        Current.database = { database }
+        Current.settingsStore.fullScreen = false
+        Current.settingsStore.webViewAlwaysBelowStatusBar = true
+
+        func setKiosk(hideStatusBar: Bool) throws {
+            try database.write { db in
+                try KioskSettings(enabled: true, hideStatusBar: hideStatusBar).insert(db, onConflict: .replace)
+            }
+        }
+
+        try setKiosk(hideStatusBar: false)
+        Current.kiosk = KioskModeManager()
+
+        let sut = makeSUT()
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        sut.setupKioskModeObservation()
+        sut.updateThemedStatusBar()
+        await waitUntil { overlayState.statusBarColor != nil }
+
+        try setKiosk(hideStatusBar: true)
+        await waitUntil { overlayState.statusBarColor == nil }
+    }
+
     func testCurrentPageURLIsNilBeforeAnyPageLoads() {
         let sut = makeSUT()
         sut.webView = WKWebView(frame: .zero)
@@ -1246,6 +1514,23 @@ final class WebViewControllerURLLoadingTests: XCTestCase {
         await sut.loadActiveURLTask?.value
     }
 
+    /// A root redirect without any configured server URL must not strand the WebView on an
+    /// unreachable page or keep retrying a redirect to a nil destination.
+    func testRootRedirectWithoutAnActiveURLShowsNoActiveURLOverlay() async {
+        let sut = makeSUT(server: .fake(update: { info in
+            info.connection.set(address: nil, for: .external)
+            _ = info.connection.evaluateActiveURL()
+        }))
+        let overlayState = WebFrontendOverlayState()
+        sut.overlayState = overlayState
+        defer { sut.redirectToRootTask?.cancel() }
+
+        sut.redirectToActiveURLRoot(failedURL: nil)
+
+        await waitUntil { overlayState.showsNoActiveURL }
+        XCTAssertTrue(overlayState.showsNoActiveURL)
+    }
+
     func testLoadActiveURLRechecksBackgroundStateAfterFrontendAssetCacheCleanCheck() {
         var isAppInBackground = false
         let sut = makeSUT()
@@ -1291,32 +1576,30 @@ final class WebViewControllerURLLoadingTests: XCTestCase {
         XCTAssertNil(sut.loadActiveURLTask)
     }
 
-    /// When an attempt hung and the web view is still blank, the last-known URL must load
-    /// synchronously -- without waiting for any async work, which just hung once already.
+    /// A stale active-URL request must immediately load the last-known URL, even when the
+    /// previous attempt cannot finish. Use a cancellable sleeper rather than parking
+    /// checked continuations: a failed assertion must never strand the test runner.
     func testStaleAttemptTriggersImmediateFallbackLoadFromLastKnownState() async {
-        let gate = AsyncGate()
-        Current.connectivity.refreshNetworkInformation = { await gate.holdIfNeeded() }
         let sut = makeSUT()
+        let staleAttempt = neverFinishingTask()
+        defer {
+            staleAttempt.cancel()
+            sut.loadActiveURLTask?.cancel()
+        }
 
-        gate.shouldHold = true
-        sut.loadActiveURLIfNeeded()
-        let hungAttempt = sut.loadActiveURLTask
-        await waitUntil { gate.waiterCount == 1 }
+        sut.loadActiveURLTask = staleAttempt
         sut.loadActiveURLTaskStartDate = Current.date()
             .addingTimeInterval(-WebViewController.loadActiveURLStaleInterval)
 
         sut.loadActiveURLIfNeeded()
 
-        // The replacement attempt is itself parked at the gate, so only the synchronous
-        // fallback can have loaded anything.
+        XCTAssertTrue(staleAttempt.isCancelled)
         await waitUntil { sut.webView.url != nil }
         XCTAssertEqual(sut.webView.url?.host, "homeassistant.local")
 
-        await waitUntil { gate.waiterCount == 2 }
-        gate.releaseNext()
-        gate.releaseNext()
-        await hungAttempt?.value
-        await sut.loadActiveURLTask?.value
+        // The replacement must settle within the bounded test wait; even if it fails,
+        // no test is allowed to await a task that may never complete.
+        await waitUntil { sut.loadActiveURLTask == nil }
         XCTAssertNil(sut.loadActiveURLTask)
     }
 

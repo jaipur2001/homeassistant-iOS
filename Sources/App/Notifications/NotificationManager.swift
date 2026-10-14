@@ -5,6 +5,7 @@ import Foundation
 import HAKit
 import MediaPlayer
 import PromiseKit
+import SFSafeSymbols
 import Shared
 import SwiftUI
 import UserNotifications
@@ -345,7 +346,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             .done(on: .main) { [weak self] webViewController in
                 guard let self else { return }
 
-                let server = self.cameraServer(
+                let server = cameraServer(
                     from: userInfo,
                     fallback: webViewController.server
                 )
@@ -363,7 +364,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                         Current.Log.info("Native kiosk media downloaded to \(localFileURL.path)")
 
                         if let requestedVolume {
-                            self.setSystemVolume(requestedVolume) { [weak self] in
+                            setSystemVolume(requestedVolume) { [weak self] in
                                 self?.startKioskAudio(
                                     fileURL: localFileURL,
                                     purpose: .general,
@@ -371,7 +372,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                                 )
                             }
                         } else {
-                            self.startKioskAudio(
+                            startKioskAudio(
                                 fileURL: localFileURL,
                                 purpose: .general,
                                 loops: 0
@@ -417,7 +418,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                     return
                 }
 
-                guard self.doorbellRingtoneRequestID == requestID else {
+                guard doorbellRingtoneRequestID == requestID else {
                     Current.Log.info("Discarding stale doorbell ringtone download")
                     try? FileManager.default.removeItem(at: localFileURL)
                     return
@@ -426,7 +427,7 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
                 Current.Log.info(
                     "Doorbell ringtone downloaded to \(localFileURL.lastPathComponent)"
                 )
-                self.startKioskAudio(
+                startKioskAudio(
                     fileURL: localFileURL,
                     purpose: .doorbell,
                     loops: -1
@@ -434,8 +435,8 @@ class NotificationManager: NSObject, LocalPushManagerDelegate {
             }
             .catch { [weak self] error in
                 guard let self else { return }
-                if self.doorbellRingtoneRequestID == requestID {
-                    self.doorbellRingtoneRequestID = nil
+                if doorbellRingtoneRequestID == requestID {
+                    doorbellRingtoneRequestID = nil
                 }
                 Current.Log.error(
                     "Unable to resolve/download doorbell ringtone \(mediaContentId): \(error)"
@@ -1085,8 +1086,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 }
 
-
-private struct KioskDoorbellPayload {
+struct KioskDoorbellPayload {
     let stationId: String?
     let triggerEntityId: String?
     let diagnosticSummary: String
@@ -1098,30 +1098,30 @@ private struct KioskDoorbellPayload {
         let routedArgument = message.flatMap(KioskPushCommand.argument(from:))
 
         if let routedArgument, routedArgument.contains(".") {
-            stationId = Self.string(
+            self.stationId = Self.string(
                 keys: ["station", "station_id"],
                 in: userInfo
             )
-            triggerEntityId = routedArgument
+            self.triggerEntityId = routedArgument
         } else if let routedArgument {
-            stationId = routedArgument
-            triggerEntityId = Self.string(
+            self.stationId = routedArgument
+            self.triggerEntityId = Self.string(
                 keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
                 in: userInfo
             )
         } else {
-            stationId = Self.string(
+            self.stationId = Self.string(
                 keys: ["station", "station_id"],
                 in: userInfo
             )
-            triggerEntityId = Self.string(
+            self.triggerEntityId = Self.string(
                 keys: ["entity_id", "trigger_entity_id", "doorbell_entity_id"],
                 in: userInfo
             )
         }
 
         let messageDiagnostic = routedArgument.map { " | message_route=\($0)" } ?? ""
-        diagnosticSummary = Self.describe(userInfo) + messageDiagnostic
+        self.diagnosticSummary = Self.describe(userInfo) + messageDiagnostic
     }
 
     private static func describe(_ dictionary: [AnyHashable: Any], depth: Int = 0) -> String {
@@ -1143,7 +1143,7 @@ private struct KioskDoorbellPayload {
             if let nested = dictionary[containerKey] as? [AnyHashable: Any] {
                 lines.append("\(containerKey){\(describe(nested, depth: depth + 1))}")
             } else if let nested = dictionary[containerKey] as? [String: Any] {
-                let converted = Dictionary<AnyHashable, Any>(
+                let converted = [AnyHashable: Any](
                     uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
                 )
                 lines.append("\(containerKey){\(describe(converted, depth: depth + 1))}")
@@ -1172,22 +1172,8 @@ private struct KioskDoorbellPayload {
             }
         }
 
-        // Search the notification containers we expect first so unrelated APNS
-        // dictionaries do not accidentally win over the Home Assistant payload.
-        for containerKey in ["homeassistant", "data"] {
-            if let nested = dictionary[containerKey] as? [AnyHashable: Any],
-               let value = string(keys: keys, in: nested, depth: depth + 1) {
-                return value
-            }
-
-            if let nested = dictionary[containerKey] as? [String: Any] {
-                let converted = Dictionary<AnyHashable, Any>(
-                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
-                )
-                if let value = string(keys: keys, in: converted, depth: depth + 1) {
-                    return value
-                }
-            }
+        if let value = stringInPreferredContainers(keys: keys, in: dictionary, depth: depth) {
+            return value
         }
 
         // Final bounded fallback for delivery variants that wrap custom data in
@@ -1199,7 +1185,7 @@ private struct KioskDoorbellPayload {
             }
 
             if let nested = value as? [String: Any] {
-                let converted = Dictionary<AnyHashable, Any>(
+                let converted = [AnyHashable: Any](
                     uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
                 )
                 if let result = string(keys: keys, in: converted, depth: depth + 1) {
@@ -1210,9 +1196,35 @@ private struct KioskDoorbellPayload {
 
         return nil
     }
+
+    private static func stringInPreferredContainers(
+        keys: Set<String>,
+        in dictionary: [AnyHashable: Any],
+        depth: Int
+    ) -> String? {
+        // Search the notification containers we expect first so unrelated APNS
+        // dictionaries do not accidentally win over the Home Assistant payload.
+        for containerKey in ["homeassistant", "data"] {
+            if let nested = dictionary[containerKey] as? [AnyHashable: Any],
+               let value = string(keys: keys, in: nested, depth: depth + 1) {
+                return value
+            }
+
+            if let nested = dictionary[containerKey] as? [String: Any] {
+                let converted = [AnyHashable: Any](
+                    uniqueKeysWithValues: nested.map { (AnyHashable($0.key), $0.value) }
+                )
+                if let value = string(keys: keys, in: converted, depth: depth + 1) {
+                    return value
+                }
+            }
+        }
+
+        return nil
+    }
 }
 
-private struct KioskDoorbellOpener: Identifiable, Equatable {
+struct KioskDoorbellOpener: Identifiable, Equatable {
     enum Kind: Int {
         case door
         case gate
@@ -1238,19 +1250,19 @@ private struct KioskDoorbellOpener: Identifiable, Equatable {
         }
     }
 
-    var systemImage: String {
+    var systemSymbol: SFSymbol {
         switch kind {
         case .door:
-            return "lock.open.fill"
+            return .lockOpenFill
         case .gate:
-            return "door.garage.open"
+            return .doorGarageOpen
         case .generic:
-            return "lock.open"
+            return .lockOpen
         }
     }
 }
 
-private struct KioskDoorbellStation {
+struct KioskDoorbellStation {
     let id: String
     let name: String
     let cameraEntityId: String
@@ -1264,7 +1276,7 @@ private struct KioskDoorbellStation {
     let openers: [KioskDoorbellOpener]
 }
 
-private enum KioskDoorbellStationResolver {
+enum KioskDoorbellStationResolver {
     enum ResolveError: LocalizedError {
         case stationMissing(String)
         case triggerEntityNotFound(String)
@@ -1362,7 +1374,7 @@ private enum KioskDoorbellStationResolver {
         }
     }
 
-    private static func resolve(
+    static func resolve(
         userInfo: [AnyHashable: Any],
         message: String?,
         entities: [EntityRegistryListForDisplay.Entity],
@@ -1412,16 +1424,12 @@ private enum KioskDoorbellStationResolver {
             }
         )
 
-        let stationId: String
-        if let requestedStation {
-            stationId = requestedStation
-        } else if let triggerStation {
-            stationId = triggerStation
-        } else if fallbackStations.count == 1, let onlyStation = fallbackStations.first {
-            stationId = onlyStation
-        } else {
-            throw ResolveError.stationMissing(payload.diagnosticSummary)
-        }
+        let stationId = try chooseStationId(
+            requestedStation: requestedStation,
+            triggerStation: triggerStation,
+            fallbackStations: fallbackStations,
+            diagnosticSummary: payload.diagnosticSummary
+        )
 
         let stationEntities = entities.filter { labels(for: $0).contains(stationId) }
         guard !stationEntities.isEmpty else {
@@ -1457,11 +1465,7 @@ private enum KioskDoorbellStationResolver {
         // carries video/remote audio and exposes the G.722 speaker backchannel.
         let intercomTargetEntityId = intercomMarker.map { _ in camera.entityId }
 
-        if let intercomMarker, intercomMarker.entityId != camera.entityId {
-            Current.Log.info(
-                "Doorbell intercom marker \(intercomMarker.entityId) routed to camera WebRTC target \(camera.entityId)"
-            )
-        }
+        logIntercomRoutingIfNeeded(marker: intercomMarker, cameraEntityId: camera.entityId)
 
         let stationTimeout = stationEntities
             .filter {
@@ -1515,13 +1519,7 @@ private enum KioskDoorbellStationResolver {
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
 
-        let trimmedDoorbellName = doorbell?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayName: String
-        if let trimmedDoorbellName, !trimmedDoorbellName.isEmpty {
-            displayName = trimmedDoorbellName
-        } else {
-            displayName = humanizedStationName(stationId)
-        }
+        let displayName = resolvedStationDisplayName(doorbell?.name, stationId: stationId)
 
         return KioskDoorbellStation(
             id: stationId,
@@ -1532,6 +1530,42 @@ private enum KioskDoorbellStationResolver {
             intercomTargetEntityId: intercomTargetEntityId,
             timeoutEntityId: timeoutEntity?.entityId,
             openers: openers
+        )
+    }
+
+    private static func chooseStationId(
+        requestedStation: String?,
+        triggerStation: String?,
+        fallbackStations: Set<String>,
+        diagnosticSummary: String
+    ) throws -> String {
+        if let requestedStation {
+            return requestedStation
+        }
+        if let triggerStation {
+            return triggerStation
+        }
+        if fallbackStations.count == 1, let onlyStation = fallbackStations.first {
+            return onlyStation
+        }
+        throw ResolveError.stationMissing(diagnosticSummary)
+    }
+
+    private static func resolvedStationDisplayName(_ name: String?, stationId: String) -> String {
+        let trimmedDoorbellName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedDoorbellName, !trimmedDoorbellName.isEmpty {
+            return trimmedDoorbellName
+        }
+        return humanizedStationName(stationId)
+    }
+
+    private static func logIntercomRoutingIfNeeded(
+        marker: EntityRegistryListForDisplay.Entity?,
+        cameraEntityId: String
+    ) {
+        guard let marker, marker.entityId != cameraEntityId else { return }
+        Current.Log.info(
+            "Doorbell intercom marker \(marker.entityId) routed to camera WebRTC target \(cameraEntityId)"
         )
     }
 
@@ -1697,7 +1731,7 @@ private final class KioskDoorbellOverlayPresenter {
             message: message,
             dismiss: { [weak self, weak webViewController] in
                 guard let self, let webViewController else { return }
-                self.hide(on: webViewController)
+                hide(on: webViewController)
             }
         )
         .embeddedInHostingController()
@@ -1744,7 +1778,7 @@ private final class KioskDoorbellOverlayPresenter {
             server: server,
             dismiss: { [weak self, weak webViewController] in
                 guard let self, let webViewController else { return }
-                self.hide(on: webViewController)
+                hide(on: webViewController)
             },
             stopRingtone: stopRingtone,
             performOpener: { [weak self] opener in
@@ -1797,7 +1831,7 @@ private struct KioskDoorbellConfigurationErrorView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 24) {
-                Image(systemName: "bell.slash.fill")
+                Image(systemSymbol: .bellSlashFill)
                     .font(.system(size: 72, weight: .bold))
                     .foregroundStyle(.orange)
 
@@ -1816,7 +1850,7 @@ private struct KioskDoorbellConfigurationErrorView: View {
                     .foregroundStyle(.secondary)
 
                 Button(action: dismiss) {
-                    Label("Schließen", systemImage: "xmark.circle.fill")
+                    Label("Schließen", systemSymbol: .xmarkCircleFill)
                         .font(.system(size: 22, weight: .bold))
                         .frame(maxWidth: 320)
                         .padding(.vertical, 12)
@@ -1862,14 +1896,14 @@ private struct KioskDoorbellView: View {
 
             VStack(spacing: 16) {
                 HStack(spacing: 10) {
-                    Image(systemName: "bell.fill")
+                    Image(systemSymbol: .bellFill)
                     Text(station.name)
                         .font(.title2.bold())
                     Spacer()
                     Button {
                         hangUp()
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
+                        Image(systemSymbol: .xmarkCircleFill)
                             .font(.title)
                     }
                     .buttonStyle(.plain)
@@ -1882,7 +1916,7 @@ private struct KioskDoorbellView: View {
                             Button {
                                 pendingOpener = opener
                             } label: {
-                                Label(opener.buttonTitle, systemImage: opener.systemImage)
+                                Label(opener.buttonTitle, systemSymbol: opener.systemSymbol)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 10)
                             }
@@ -1898,7 +1932,7 @@ private struct KioskDoorbellView: View {
                     } label: {
                         Label(
                             isMicrophoneEnabled ? "Mikrofon EIN" : "Mikrofon AUS",
-                            systemImage: isMicrophoneEnabled ? "mic.fill" : "mic.slash.fill"
+                            systemSymbol: isMicrophoneEnabled ? .micFill : .micSlashFill
                         )
                         .font(.system(size: 20, weight: .bold))
                         .frame(maxWidth: .infinity)
@@ -1912,7 +1946,7 @@ private struct KioskDoorbellView: View {
                     Button {
                         hangUp()
                     } label: {
-                        Label("Auflegen", systemImage: "phone.down.fill")
+                        Label("Auflegen", systemSymbol: .phoneDownFill)
                             .font(.system(size: 20, weight: .bold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
@@ -2039,7 +2073,7 @@ private struct KioskDoorbellView: View {
     }
 }
 
-private struct KioskAlarmPayload {
+struct KioskAlarmPayload {
     let title: String
     let area: String
     let source: String
@@ -2049,14 +2083,14 @@ private struct KioskAlarmPayload {
     let acknowledgeEntityId: String
 
     init(userInfo: [AnyHashable: Any]) {
-        title = Self.string("alarm_title", in: userInfo) ?? "ALARM"
-        area = Self.string("alarm_area", in: userInfo) ?? "Unbekannter Bereich"
-        source = Self.string("alarm_source", in: userInfo) ?? "Unbekannte Alarmquelle"
-        priority = Self.integer("alarm_priority", in: userInfo) ?? 0
-        message = Self.string("alarm_message", in: userInfo)
+        self.title = Self.string("alarm_title", in: userInfo) ?? "ALARM"
+        self.area = Self.string("alarm_area", in: userInfo) ?? "Unbekannter Bereich"
+        self.source = Self.string("alarm_source", in: userInfo) ?? "Unbekannte Alarmquelle"
+        self.priority = Self.integer("alarm_priority", in: userInfo) ?? 0
+        self.message = Self.string("alarm_message", in: userInfo)
             ?? "Die akustische Alarmierung ist aktiv.\nBitte Ursache prüfen und anschließend den Alarm quittieren."
-        buttonText = Self.string("alarm_button_text", in: userInfo) ?? "QUITTIEREN"
-        acknowledgeEntityId = Self.string("ack_entity_id", in: userInfo) ?? "script.alarmansage_quittieren"
+        self.buttonText = Self.string("alarm_button_text", in: userInfo) ?? "QUITTIEREN"
+        self.acknowledgeEntityId = Self.string("ack_entity_id", in: userInfo) ?? "script.alarmansage_quittieren"
     }
 
     private static func string(_ key: String, in userInfo: [AnyHashable: Any]) -> String? {
@@ -2173,7 +2207,7 @@ private final class KioskAlarmOverlayPresenter {
             alarm: alarm,
             acknowledge: { [weak self, weak webViewController] in
                 guard let self, let webViewController else { return }
-                self.acknowledge(alarm: alarm, server: server, on: webViewController)
+                acknowledge(alarm: alarm, server: server, on: webViewController)
             }
         )
         .embeddedInHostingController()
@@ -2233,7 +2267,7 @@ private struct KioskAlarmView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 28) {
-                Image(systemName: "exclamationmark.triangle.fill")
+                Image(systemSymbol: .exclamationmarkTriangleFill)
                     .font(.system(size: 92, weight: .bold))
                     .foregroundStyle(.red)
 
@@ -2261,7 +2295,7 @@ private struct KioskAlarmView: View {
                     .padding(.top, 8)
 
                 Button(action: acknowledge) {
-                    Label(alarm.buttonText, systemImage: "checkmark.shield.fill")
+                    Label(alarm.buttonText, systemSymbol: .checkmarkShieldFill)
                         .font(.system(size: 30, weight: .black, design: .rounded))
                         .frame(maxWidth: 520)
                         .padding(.vertical, 22)

@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b  # v1.321.0
         with:
           ruby-version: "3.1"
@@ -39,12 +41,27 @@ jobs:
         run: |
           docker run --rm -v `pwd`:`pwd` -w `pwd` \
             ghcr.io/realm/swiftlint:0.54.0 \
-            swiftlint lint --strict --config .swiftlint.yml --reporter github-actions-logging
+            swiftlint lint --strict --config .swiftlint.yml --reporter xcode
       - name: SwiftFormat
+        if: ${{ success() || failure() }}
+        shell: bash
         run: |
-          docker run --rm -v `pwd`:`pwd` -w `pwd` \
-            ghcr.io/nicklockwood/swiftformat:0.53.1 \
-            --lint --config .swiftformat .
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            # Check all changed Swift files without reformatting unrelated legacy code.
+            git diff --name-only --diff-filter=ACMR HEAD^1 HEAD -- '*.swift' > .swiftformat-changed-files
+            if [[ ! -s .swiftformat-changed-files ]]; then
+              echo "No changed Swift files in this pull request."
+              exit 0
+            fi
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" \
+              ghcr.io/nicklockwood/swiftformat:0.53.1 \
+              --lint --config .swiftformat --filelist .swiftformat-changed-files
+          else
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" \
+              ghcr.io/nicklockwood/swiftformat:0.53.1 \
+              --lint --config .swiftformat .
+          fi
 
   check-swiftlint-disables:
     needs: lint
@@ -146,6 +163,8 @@ jobs:
             ```
 
   test:
+    # Never allocate an expensive Xcode runner for a pull request that already fails lint.
+    needs: lint
     runs-on: xcode-27
     timeout-minutes: 90
     steps:
@@ -211,7 +230,7 @@ jobs:
           -project HomeAssistant.xcodeproj
           -scheme Tests-Unit
 
-      - name: Run tests
+      - name: Run complete unit test suite
         run: bundle exec fastlane test
 
       # Save the warmed DerivedData only from `main`, and only on a fresh key,
@@ -236,7 +255,10 @@ jobs:
       # must not. `fail_ci_if_error` covers only the upload result, not the uploader's
       # own setup steps (dependency checks, CLI download, signature verification), which
       # exit nonzero on their own, so the action needs the same treatment.
+      # Also convert xcresult after test failures. If the session finished despite an
+      # assertion failure, its coverage helps diagnose the next patch-coverage gap.
       - name: Build coverage report
+        if: ${{ success() || failure() }}
         continue-on-error: true
         run: >-
           python3 Tools/xccov_to_lcov.py fastlane/test_output/Tests-Unit.xcresult
@@ -271,6 +293,7 @@ jobs:
             ~/Library/Developer/Xcode/DerivedData/HomeAssistant-*/Logs/Test
             ~/Library/Logs/scan
             fastlane/test_output/Tests-Unit.xcresult
+            fastlane/test_output/coverage.lcov
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         name: "Upload Simulator App"
@@ -313,11 +336,15 @@ jobs:
           name: coverage-lcov
           path: fastlane/test_output
 
-      # Coverage that could not be measured must not block: when the conversion or the
-      # artifact is missing, this step is skipped and sets no output, which leaves the
-      # gate reporting nothing and dismisses any request an earlier run left behind,
-      # rather than blocking on a number nobody can act on. The step itself is
-      # `continue-on-error` because the script exits nonzero to report the shortfall.
+      # A failed test run has no trustworthy coverage report. If all tests pass,
+      # the tracefile is mandatory, and this gate must never silently skip it.
+      # Measurement itself is continue-on-error to publish the exact shortfall.
+      - name: Require coverage after successful tests
+        if: needs.test.result == 'success' && steps.tracefile.outcome != 'success'
+        run: |
+          echo "::error::Unit tests passed, but the LCOV tracefile is missing"
+          exit 1
+
       - name: Measure patch coverage
         id: coverage
         if: steps.tracefile.outcome == 'success'
