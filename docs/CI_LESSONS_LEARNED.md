@@ -29,6 +29,7 @@ Geltungsbereich: `jaipur2001/homeassistant-iOS`, insbesondere Kiosk-/Doorbell-In
 | CI #37 | Diagnosegruppen erfolgreich: Zone 12/12, Shortcuts 6/6, kombiniert 18/18 bei abgeschalteter Xcode-Parallelisierung | Gezielte Diagnose validiert die Fälle, ersetzt aber weder vollständigen Unit-Testlauf noch Coverage-Messung |
 | CI #41 | Alle Unit-Tests und statischen Checks erfolgreich; Patch Coverage 89,59 % (284/317) knapp unter 90 % | Drei bislang ungetestete Zeilen der AVCC/H.264-Längenfeldverarbeitung gezielt mit gültigen und defekten NAL-Paketen abdecken, Coverage-Grenze unverändert lassen |
 | CI #42 | SwiftLint und SwiftFormat grün, 4.508/4.509 Unit-Tests bestanden; der WebView-Render-Test wartete 5 s auf WKWebView und schlug fehl, während eine relative Bildressource von `example.com` geladen werden konnte | WebKit-Tests mit Inline-SVG offline gestalten, damit `isLoading` nicht von Netzwerkzugriffen abhängt; Coverage nach bestandenem Testlauf messen |
+| CI #43 | SwiftFormat grün; ein SwiftUI-Test `NotificationSettingsViewTests.rendersWithForceCloseWarningRow` hing beim Layout in einem temporären `UIWindow` und erreichte das 180-s-Testlimit; der Simulator meldete Service-Hub-Verbindungsprobleme. LCOV aus dem Artefakt ergab nach eigener Auswertung 288/320 = 90,00 % Patch Coverage, jedoch keine gültige grüne CI | UIHostingController/Window-Layout nicht für reine Plattform- und Index-Prüfungen aufrufen. Stattdessen den `View.body`-Builder ohne Fenster auswerten und UI/Index-Bedingungen deterministisch prüfen. Echte E2E-UI-Prüfungen separat behandeln |
 | CI #38 | 4.506 Unit-Tests, nur `AppIconShortcutItemsUpdaterTests.resolvesNameAndArea()` fehlgeschlagen. Test wartete lediglich auf einen beliebigen Shortcut und las den zuvor gesetzten `test.pending`-Platzhalter. Zusätzlich 600 s Simulator-Sysdiagnose | Asynchrone Tests müssen auf **die erwartete Identität und den erwarteten Inhalt** warten, nicht auf `isEmpty == false`; Xcode-Diagnose mit `-collect-test-diagnostics never` abschalten |
 
 ## Unverzichtbarer Preflight vor jedem Code-Commit
@@ -128,3 +129,18 @@ von `WKWebView.isLoading` gewartet, hängt der Test ungewollt von externen
 Ressourcen ab. Für die Render-Erkennung deshalb lokal eingebettete HTML-/SVG-
 Inhalte verwenden, auch in anderen WebView-Tests. Kein pauschales Erhöhen der
 Timeouts und keine Deaktivierung der inhaltlichen Assertion.
+
+## CI #43: Keine UIWindow-Layouts fuer reine Bedingungs-Tests
+
+`NotificationSettingsViewTests` hatte zwei rendernde Smoke-Tests ohne eine
+inhaltliche Assertion ueber den dargestellten Zeileninhalt. Ein solcher Test
+blockierte den Simulator 180 Sekunden lang. Beide Tests evaluieren stattdessen
+den `View.body`-Builder ohne `UIWindow` und pruefen explizit die
+plattformabhaengigen Suchindizes. Die vorhandenen beiden Suchindex-Tests
+bleiben erhalten.
+
+Die aus `test-logs` extrahierte `coverage.lcov` von CI #43 enthaelt 288
+abgedeckte unter 320 geaenderten ausfuehrbaren Zeilen gegen Merge-Base
+`62f05b7fd397dcd627a2d11bc325e6b61a028796`: genau **90,00 %**.
+Dies ist eine eigene Nachrechnung mit unveraenderter Messlogik; ein offizieller
+Coverage-Gate-Erfolg erfordert weiterhin eine vollstaendig gruene Test-Suite.
