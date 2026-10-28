@@ -41,10 +41,10 @@ def pin_form_schema() -> vol.Schema:
     """Require two masked fields without pre-filling the previous PIN."""
     return vol.Schema(
         {
-            vol.Required(vol.Secret("pin")): TextSelector(
+            vol.Required("pin"): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.PASSWORD)
             ),
-            vol.Required(vol.Secret("pin_confirm")): TextSelector(
+            vol.Required("pin_confirm"): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.PASSWORD)
             ),
         }
