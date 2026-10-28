@@ -1,3 +1,4 @@
-trigger: kiosk79-ci44-green-build
-source_commit: 5928924ed8dd9847e1767ddda2847b38d40ab047
-candidate: 79
+trigger: kiosk80-alarm-pin-test
+source_commit: c851416fbc6ea9c27d125a3b9ddaf6eb94eef2b9
+candidate: 80
+note: build isolated test candidate; golden 79 unchanged
