@@ -39,6 +39,8 @@ class Context:
 
 core.Context = Context
 core.Event = object
+fake_module("homeassistant.config_entries").SOURCE_IMPORT = "import"
+sys.modules["homeassistant.config_entries"].ConfigEntry = object
 fake_module("homeassistant.helpers")
 storage = fake_module("homeassistant.helpers.storage")
 
@@ -75,6 +77,7 @@ def pin_hash(pin):
 class FakeHass:
     def __init__(self):
         self.storage = {}
+        self.data = {}
         self.active = True
         self.states = SimpleNamespace(
             is_state=lambda entity, state: self.active and
@@ -136,7 +139,31 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
             {TRUSTED}, "ALARM_QUITTIEREN", "input_button.alarmansage_quittieren"
         )
         self.hass.controller = self.controller
+        self.hass.data["kiosk_alarm"] = self.controller
         await self.controller.async_initialize()
+
+    async def test_admin_pin_change_clears_lockouts(self):
+        original_hash = self.controller._pin_hash
+        for candidate in ("111111", "222222", "333333"):
+            await self.controller.async_check_pin(candidate)
+        self.assertEqual(await self.controller.async_check_pin("246802"), 429)
+        await self.controller.async_replace_pin_hash(pin_hash("135790"))
+        self.assertNotEqual(self.controller._pin_hash, original_hash)
+        self.assertEqual(await self.controller.async_check_pin("135790"), 200)
+        self.assertEqual(await self.controller.async_check_pin("246802"), 403)
+
+    async def test_config_entry_unloaded_fails_closed(self):
+        view = alarm.KioskAlarmAcknowledgeView(self.hass)
+        self.hass.data.pop("kiosk_alarm")
+        response = await view.post(FakeRequest({"pin": "246802"}))
+        self.assertEqual(response.status, 503)
+        self.assertEqual(self.hass.calls, 0)
+
+    async def test_invalid_hash_rejected(self):
+        previous = self.controller._pin_hash
+        with self.assertRaises(ValueError):
+            await self.controller.async_replace_pin_hash("not-a-hash")
+        self.assertEqual(self.controller._pin_hash, previous)
 
     async def test_wrong_pin_three_attempt_lockout_persists(self):
         self.assertEqual(await self.controller.async_check_pin("111111"), 403)
@@ -197,7 +224,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.calls, 1)
 
     async def test_http_wrong_correct_and_inactive(self):
-        view = alarm.KioskAlarmAcknowledgeView(self.controller)
+        view = alarm.KioskAlarmAcknowledgeView(self.hass)
         self.assertEqual((await view.post(FakeRequest({"pin": "junk"}))).status, 400)
         self.assertEqual((await view.post(FakeRequest({"pin": "123456"}))).status, 403)
         result = await view.post(FakeRequest({"pin": "246802"}))

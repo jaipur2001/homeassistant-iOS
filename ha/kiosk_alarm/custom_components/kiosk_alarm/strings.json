@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Kiosk Alarm PIN",
+        "description": "Only Home Assistant administrators may configure the alarm PIN. Enter a new six-digit PIN twice.",
+        "data": {
+          "pin": "New six-digit PIN",
+          "pin_confirm": "Repeat PIN"
+        }
+      }
+    },
+    "error": {
+      "invalid_pin": "Use exactly six digits (0-9).",
+      "pin_mismatch": "The PIN values do not match."
+    },
+    "abort": {
+      "already_configured": "Kiosk Alarm PIN is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Change alarm PIN (administrators only)",
+        "description": "Enter a new six-digit PIN twice. The PIN takes effect immediately.",
+        "data": {
+          "pin": "New six-digit PIN",
+          "pin_confirm": "Repeat new PIN"
+        }
+      }
+    },
+    "error": {
+      "invalid_pin": "Use exactly six digits (0-9).",
+      "pin_mismatch": "The PIN values do not match."
+    }
+  }
+}

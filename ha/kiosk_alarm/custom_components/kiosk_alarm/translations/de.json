@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Kiosk-Alarm-PIN einrichten",
+        "description": "Nur Administratoren dürfen die Alarm-PIN konfigurieren. Gib die neue sechsstellige PIN zweimal ein.",
+        "data": {
+          "pin": "Neue sechsstellige PIN",
+          "pin_confirm": "PIN wiederholen"
+        }
+      }
+    },
+    "error": {
+      "invalid_pin": "Verwende genau sechs Ziffern (0-9).",
+      "pin_mismatch": "Die beiden PIN-Eingaben stimmen nicht überein."
+    },
+    "abort": {
+      "already_configured": "Die Kiosk-Alarm-PIN ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Alarm-PIN ändern (nur Administratoren)",
+        "description": "Gib die neue PIN zweimal ein. Sie gilt sofort; eine Sperre wird aufgehoben.",
+        "data": {
+          "pin": "Neue sechsstellige PIN",
+          "pin_confirm": "Neue PIN wiederholen"
+        }
+      }
+    },
+    "error": {
+      "invalid_pin": "Verwende genau sechs Ziffern (0-9).",
+      "pin_mismatch": "Die beiden PIN-Eingaben stimmen nicht überein."
+    }
+  }
+}

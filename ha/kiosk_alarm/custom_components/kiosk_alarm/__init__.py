@@ -20,6 +20,7 @@ from aiohttp import web
 import voluptuous as vol
 
 from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import (
     Context,
@@ -70,54 +71,101 @@ CONFIG_SCHEMA = vol.Schema(
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Install the guard service, then authenticated view and trusted event routes."""
-    if DOMAIN not in config:
-        return True
+    """Register a fail-closed guard and migrate YAML into an admin-managed entry."""
+    async def consume_grant(call: ServiceCall) -> ServiceResponse:
+        controller = hass.data.get(DOMAIN)
+        if controller is None:
+            return {"allowed": False}
+        return await controller.async_consume_grant(call)
 
-    settings = config[DOMAIN]
-    controller = KioskAlarmController(
-        hass,
-        pin_hash=settings["pin_hash"],
-        script_entity_id=settings["script_entity_id"],
-        trusted_user_ids=set(settings["trusted_user_ids"]),
-        mobile_action=settings["mobile_action"],
-        dashboard_button_entity_id=settings["dashboard_button_entity_id"],
-    )
-    await controller.async_initialize()
-    hass.data[DOMAIN] = controller
     hass.services.async_register(
         DOMAIN,
         "consume_grant",
-        controller.async_consume_grant,
+        consume_grant,
         schema=vol.Schema(
             {vol.Optional("grant", default=""): vol.All(str, vol.Length(max=128))}
         ),
         supports_response=SupportsResponse.ONLY,
     )
-    hass.http.register_view(KioskAlarmAcknowledgeView(controller))
+    hass.http.register_view(KioskAlarmAcknowledgeView(hass))
+
+    if DOMAIN in config:
+        # Never replace a prior admin-changed Config Entry with an older YAML hash.
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": SOURCE_IMPORT},
+                data=config[DOMAIN],
+            )
+        )
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Start the protected alarm controller from a persisted config entry."""
+    if DOMAIN in hass.data:
+        _LOGGER.error("Refusing to start a second kiosk alarm controller")
+        return False
+
+    settings = {**entry.data, **entry.options}
+    pin_hash = settings.get("pin_hash")
+    if not isinstance(pin_hash, str) or _HASH.fullmatch(pin_hash) is None:
+        _LOGGER.error("Kiosk alarm config entry has no valid PIN hash")
+        return False
+
+    controller = KioskAlarmController(
+        hass,
+        pin_hash=pin_hash,
+        script_entity_id=settings.get(
+            "script_entity_id", "script.alarmansage_quittieren"
+        ),
+        trusted_user_ids=set(settings.get("trusted_user_ids", [])),
+        mobile_action=settings.get("mobile_action", "ALARM_QUITTIEREN"),
+        dashboard_button_entity_id=settings.get(
+            "dashboard_button_entity_id", "input_button.alarmansage_quittieren"
+        ),
+    )
+    await controller.async_initialize()
+    hass.data[DOMAIN] = controller
 
     @callback
     def on_mobile_action(event: Event) -> None:
-        if event.data.get("action") != controller.mobile_action:
-            return
-        controller.dispatch_trusted_event(event, "mobile_action")
+        if event.data.get("action") == controller.mobile_action:
+            controller.dispatch_trusted_event(event, "mobile_action")
 
     @callback
     def on_button_state(event: Event) -> None:
         if event.data.get("entity_id") != controller.dashboard_button_entity_id:
             return
-        if event.data.get("new_state") is None:
-            return
-        controller.dispatch_trusted_event(event, "dashboard_button")
+        if event.data.get("new_state") is not None:
+            controller.dispatch_trusted_event(event, "dashboard_button")
 
-    hass.bus.async_listen("mobile_app_notification_action", on_mobile_action)
-    hass.bus.async_listen(EVENT_STATE_CHANGED, on_button_state)
+    entry.async_on_unload(
+        hass.bus.async_listen("mobile_app_notification_action", on_mobile_action)
+    )
+    entry.async_on_unload(
+        hass.bus.async_listen(EVENT_STATE_CHANGED, on_button_state)
+    )
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     _LOGGER.info(
-        "Kiosk alarm PIN protection loaded; %d trusted HA user IDs configured",
+        "Kiosk alarm protection loaded; %d trusted HA user IDs configured",
         len(controller.trusted_user_ids),
     )
     return True
 
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Activate changed PIN hashes without a Home Assistant restart."""
+    controller = hass.data.get(DOMAIN)
+    if controller is not None:
+        pin_hash = entry.options.get("pin_hash", entry.data["pin_hash"])
+        await controller.async_replace_pin_hash(pin_hash)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Refuse PIN acknowledgements if this entry is disabled or removed."""
+    hass.data.pop(DOMAIN, None)
+    return True
 
 class KioskAlarmController:
     """Validate PINs or trusted event identities and issue one-use script grants."""
@@ -213,6 +261,19 @@ class KioskAlarmController:
             await self._async_save_lockout()
             return 200
 
+    async def async_replace_pin_hash(self, pin_hash: str) -> None:
+        """Apply a new admin-generated PIN hash and reset previous lockouts."""
+        if _HASH.fullmatch(pin_hash) is None:
+            raise ValueError("Invalid PIN hash")
+        async with self._pin_lock:
+            if self._pin_hash == pin_hash:
+                return
+            self._pin_hash = pin_hash
+            self._failed_attempts = 0
+            self._blocked_until = None
+            await self._async_save_lockout()
+            _LOGGER.warning("Kiosk alarm PIN changed via administrator settings")
+
     async def async_consume_grant(self, call: ServiceCall) -> ServiceResponse:
         """Only one-use, short-lived random grants authorize the script."""
         grant = call.data.get("grant", "")
@@ -293,11 +354,14 @@ class KioskAlarmAcknowledgeView(HomeAssistantView):
     name = "api:kiosk_alarm:acknowledge"
     requires_auth = True
 
-    def __init__(self, controller: KioskAlarmController) -> None:
-        self._controller = controller
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle a bounded six-digit PIN request."""
+        controller = self._hass.data.get(DOMAIN)
+        if controller is None:
+            return web.json_response({"ok": False}, status=503)
         user = request[KEY_HASS_USER]
         if request.content_length is not None and request.content_length > 128:
             return web.json_response({"ok": False}, status=400)
@@ -314,11 +378,11 @@ class KioskAlarmAcknowledgeView(HomeAssistantView):
         pin = body.get("pin")
         if not isinstance(pin, str) or _PIN_FORMAT.fullmatch(pin) is None:
             return web.json_response({"ok": False}, status=400)
-        if not self._controller.alarm_active:
+        if not controller.alarm_active:
             return web.json_response({"ok": False}, status=409)
 
-        pin_status = await self._controller.async_check_pin(pin)
+        pin_status = await controller.async_check_pin(pin)
         if pin_status != 200:
             return web.json_response({"ok": False}, status=pin_status)
-        ok = await self._controller.async_acknowledge("kiosk_pin", user.id)
+        ok = await controller.async_acknowledge("kiosk_pin", user.id)
         return web.json_response({"ok": ok}, status=200 if ok else 503)
