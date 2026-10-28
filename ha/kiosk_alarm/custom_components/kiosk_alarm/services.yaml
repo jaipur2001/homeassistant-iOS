@@ -1,0 +1,9 @@
+# Only the internal guard service is exposed; PIN management uses
+# administrator-only Home Assistant config-entry options flows.
+consume_grant:
+  fields:
+    grant:
+      required: false
+      selector:
+        text:
+          type: password

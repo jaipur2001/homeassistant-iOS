@@ -33,5 +33,17 @@
       "invalid_pin": "Use exactly six digits (0-9).",
       "pin_mismatch": "The PIN values do not match."
     }
+  },
+  "services": {
+    "consume_grant": {
+      "name": "Check internal alarm acknowledgment grant",
+      "description": "Internal single-use authorization check for the protected alarm script. Not intended for manual use.",
+      "fields": {
+        "grant": {
+          "name": "One-time authorization token",
+          "description": "Short-lived server-issued token consumed by the protected alarm script."
+        }
+      }
+    }
   }
 }

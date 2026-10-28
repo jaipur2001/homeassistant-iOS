@@ -33,5 +33,17 @@
       "invalid_pin": "Verwende genau sechs Ziffern (0-9).",
       "pin_mismatch": "Die beiden PIN-Eingaben stimmen nicht überein."
     }
+  },
+  "services": {
+    "consume_grant": {
+      "name": "Interne Alarmfreigabe prüfen",
+      "description": "Interne einmalige Freigabeprüfung für das geschützte Alarmquittierungsskript. Nicht manuell aufrufen.",
+      "fields": {
+        "grant": {
+          "name": "Einmaliges Freigabetoken",
+          "description": "Kurzlebiges Token, das nur der Server für die Alarmquittierung erzeugt."
+        }
+      }
+    }
   }
 }
