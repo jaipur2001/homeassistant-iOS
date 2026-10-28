@@ -81,3 +81,17 @@ Linux-Tests:
 GitHub Actions Runs 40678604016 und 40678855334 erfolgreich.
 Das sind keine Xcode-, Swift-Lint-, Geräte- oder echten Home-Assistant-Integrationstests.
 **Vor Rollout sind iOS-Build und Produktiv-Konfigurations-Audit Pflicht.**
+
+## Integrations-Icon (`mdi:shield-lock`)
+
+Ab **Home Assistant 2026.3** lädt Home Assistant das Icon direkt aus
+`custom_components/kiosk_alarm/brand/`. Die PNG-Dateien heißen
+`icon.png` (256 × 256) und `icon@2x.png` (512 × 512); Hintergrund
+transparent, Schild in Petrol/Türkis (`#008C9B`). Kein Brands-PR oder
+zusätzlicher Manifest-Eintrag notwendig. Lizenz und editierbare Quelle
+liegen im selben Ordner.
+
+Für eine bestehende Installation **nur den Ordner `brand/`** nach
+`/config/custom_components/kiosk_alarm/brand/` kopieren. Danach HA neu
+starten und gegebenenfalls den Browsercache aktualisieren. Die bestehende
+PIN, der Hash und die Adminrechte werden dabei nicht verändert.

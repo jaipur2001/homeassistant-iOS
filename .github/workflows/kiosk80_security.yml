@@ -7,6 +7,7 @@ on:
       - feature/kiosk80-alarm-pin
       - feature/kiosk81-pin-keypad-layout
       - feature/kiosk-alarm-pin-ha-ui
+      - feature/kiosk-alarm-shield-lock-brand
     paths:
       - "ha/kiosk_alarm/**"
       - "Sources/App/Notifications/NotificationManager.swift"
