@@ -20,21 +20,28 @@ SCRIPTS = """\
 priorisierte_alarmwiedergabe:
   alias: Alarm Controller
   sequence:
-  - alias: Popup
-    action: browser_mod.popup
-    data:
-      tag: alarmansage
-      title: Alarm
+  - alias: Alarmauflage
+    parallel:
+    - sequence:
+      - alias: Browser popup
+        action: browser_mod.popup
+        data:
+          tag: alarmansage
+          title: Alarm
           right_button: QUITTIEREN
           right_button_variant: danger
           right_button_appearance: filled
           right_button_close: false
           right_button_action:
             action: script.alarmansage_quittieren
-  - alias: iPad notification
-    action: notify.mobile_app_ipad01
-    data:
-      message: alert
+    - sequence:
+      - repeat:
+          for_each: []
+          sequence:
+          - action: notify.mobile_app_ipad01
+            data:
+              message: alert
+              data:
                 actions:
                 - action: ALARM_QUITTIEREN
                   title: QUITTIEREN
