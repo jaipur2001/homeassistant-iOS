@@ -2205,9 +2205,12 @@ private final class KioskAlarmOverlayPresenter {
     ) {
         let controller = KioskAlarmView(
             alarm: alarm,
-            acknowledge: { [weak self, weak webViewController] in
-                guard let self, let webViewController else { return }
-                acknowledge(alarm: alarm, server: server, on: webViewController)
+            acknowledge: { [weak self, weak webViewController] pin, completion in
+                guard let self, let webViewController else {
+                    completion("Der Alarmdialog ist nicht mehr aktiv.")
+                    return
+                }
+                self.acknowledge(pin: pin, server: server, on: webViewController, completion: completion)
             }
         )
         .embeddedInHostingController()
@@ -2223,92 +2226,243 @@ private final class KioskAlarmOverlayPresenter {
         )
     }
 
+    /// Never call an acknowledgement script directly from the kiosk: the authenticated HA endpoint
+    /// verifies the PIN and applies a server-side lockout before performing the acknowledgement.
     private func acknowledge(
-        alarm: KioskAlarmPayload,
+        pin: String,
         server: Server,
-        on webViewController: WebViewControllerProtocol
+        on webViewController: WebViewControllerProtocol,
+        completion: @escaping (String?) -> Void
     ) {
-        guard alarm.acknowledgeEntityId.hasPrefix("script.") else {
-            Current.Log.error(
-                "Kiosk alarm acknowledgement rejected: invalid script entity \(alarm.acknowledgeEntityId)"
-            )
-            return
-        }
+        Task {
+            do {
+                let result = try await HomeAssistantRESTClient.sendForJSON(
+                    server: server,
+                    method: .post,
+                    path: ["kiosk_alarm", "acknowledge"],
+                    body: ["pin": pin],
+                    timeout: 20
+                )
 
-        guard let api = Current.api(for: server) else {
-            Current.Log.error("Kiosk alarm acknowledgement failed: no API available")
-            return
-        }
+                guard let response = result as? [String: Any],
+                      response["ok"] as? Bool == true else {
+                    DispatchQueue.main.async {
+                        completion("Keine gültige Bestätigung von Home Assistant erhalten.")
+                    }
+                    return
+                }
 
-        api.callServiceWithResponse(
-            domain: "script",
-            service: "turn_on",
-            serviceData: ["entity_id": alarm.acknowledgeEntityId],
-            returnResponse: false
-        ).done { [weak self, weak webViewController] _ in
-            DispatchQueue.main.async {
-                guard let self, let webViewController else { return }
-                Current.Log.info("Kiosk alarm acknowledged via \(alarm.acknowledgeEntityId)")
-                self.hide(on: webViewController)
+                DispatchQueue.main.async { [weak self, weak webViewController] in
+                    guard let self, let webViewController else {
+                        completion("Der Alarmdialog ist nicht mehr aktiv.")
+                        return
+                    }
+                    Current.Log.info("Kiosk alarm acknowledged after server-side PIN validation")
+                    self.hide(on: webViewController)
+                    completion(nil)
+                }
+            } catch {
+                let message: String
+                if let restError = error as? HomeAssistantRESTError {
+                    switch restError {
+                    case let .unacceptableStatus(code, _):
+                        switch code {
+                        case 401:
+                            message = "Home Assistant verlangt eine erneute Anmeldung."
+                        case 403:
+                            message = "PIN falsch. Alarm nicht quittiert."
+                        case 404:
+                            message = "PIN-Prüfung in Home Assistant noch nicht installiert."
+                        case 409:
+                            message = "Es liegt kein quittierbarer Alarm mehr vor."
+                        case 429:
+                            message = "Zu viele Fehlversuche. Bitte fünf Minuten warten."
+                        default:
+                            message = "Quittierung vom Home-Assistant-Server abgelehnt."
+                        }
+                    case .invalidResponse, .tokenUnavailable:
+                        message = "Home Assistant ist derzeit nicht erreichbar."
+                    }
+                } else {
+                    message = "Keine Verbindung zur geschützten Alarmquittierung."
+                }
+
+                // Never log the PIN, response body, or credentials.
+                Current.Log.warning("Kiosk PIN acknowledgement failed: \(type(of: error))")
+                DispatchQueue.main.async {
+                    completion(message)
+                }
             }
-        }.catch { error in
-            Current.Log.error("Kiosk alarm acknowledgement failed: \(error)")
         }
     }
 }
 
-private struct KioskAlarmView: View {
+struct KioskAlarmView: View {
     let alarm: KioskAlarmPayload
-    let acknowledge: () -> Void
+    let acknowledge: (String, @escaping (String?) -> Void) -> Void
+
+    @State private var isEnteringPIN = false
+    @State private var isSubmitting = false
+    @State private var pin = ""
+    @State private var errorMessage: String?
+
+    static func isValidPIN(_ candidate: String) -> Bool {
+        candidate.utf8.count == 6 && candidate.utf8.allSatisfy { (48 ... 57).contains($0) }
+    }
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.92)
                 .ignoresSafeArea()
 
-            VStack(spacing: 28) {
+            VStack(spacing: 22) {
                 Image(systemSymbol: .exclamationmarkTriangleFill)
-                    .font(.system(size: 92, weight: .bold))
+                    .font(.system(size: 74, weight: .bold))
                     .foregroundStyle(.red)
 
                 Text(alarm.title)
-                    .font(.system(size: 54, weight: .black, design: .rounded))
+                    .font(.system(size: 50, weight: .black, design: .rounded))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.white)
                     .minimumScaleFactor(0.5)
 
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
                     Text("Bereich: \(alarm.area)")
                     Text("Alarmquelle: \(alarm.source)")
                     if alarm.priority > 0 {
                         Text("Priorität: \(alarm.priority)")
                     }
                 }
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white)
 
-                Text(alarm.message)
-                    .font(.system(size: 22, weight: .medium, design: .rounded))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .padding(.top, 8)
+                if isEnteringPIN {
+                    pinEntry
+                } else {
+                    Text(alarm.message)
+                        .font(.system(size: 22, weight: .medium, design: .rounded))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.top, 8)
 
-                Button(action: acknowledge) {
-                    Label(alarm.buttonText, systemSymbol: .checkmarkShieldFill)
-                        .font(.system(size: 30, weight: .black, design: .rounded))
-                        .frame(maxWidth: 520)
-                        .padding(.vertical, 22)
+                    Button {
+                        isEnteringPIN = true
+                    } label: {
+                        Label(alarm.buttonText, systemSymbol: .checkmarkShieldFill)
+                            .font(.system(size: 30, weight: .black, design: .rounded))
+                            .frame(maxWidth: 520)
+                            .padding(.vertical, 22)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.large)
+                    .padding(.top, 12)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.large)
-                .padding(.top, 12)
             }
-            .padding(48)
+            .padding(32)
             .frame(maxWidth: 900)
         }
         .interactiveDismissDisabled(true)
+    }
+
+    private var pinEntry: some View {
+        VStack(spacing: 14) {
+            Text("Sicherheits-PIN zur Quittierung eingeben")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.white)
+
+            HStack(spacing: 16) {
+                ForEach(0 ..< 6, id: \.self) { index in
+                    Circle()
+                        .fill(index < pin.count ? Color.white : Color.gray.opacity(0.5))
+                        .frame(width: 19, height: 19)
+                }
+            }
+            .accessibilityLabel("\(pin.count) von 6 Ziffern eingegeben")
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
+            ForEach(0 ..< 3, id: \.self) { row in
+                HStack(spacing: 14) {
+                    ForEach(1 ..< 4, id: \.self) { column in
+                        digitButton(row * 3 + column)
+                    }
+                }
+            }
+
+            HStack(spacing: 14) {
+                Button("Abbrechen") {
+                    pin = ""
+                    errorMessage = nil
+                    isEnteringPIN = false
+                }
+                .disabled(isSubmitting)
+                .frame(width: 100, height: 56)
+
+                digitButton(0)
+
+                Button {
+                    if !pin.isEmpty {
+                        pin.removeLast()
+                        errorMessage = nil
+                    }
+                } label: {
+                    Image(systemSymbol: .deleteLeftFill)
+                        .font(.system(size: 28))
+                        .frame(width: 100, height: 56)
+                }
+                .disabled(isSubmitting || pin.isEmpty)
+                .buttonStyle(.bordered)
+            }
+            .foregroundStyle(.white)
+
+            Button(action: submitPIN) {
+                if isSubmitting {
+                    ProgressView()
+                        .tint(.white)
+                } else {
+                    Label("PIN bestätigen", systemSymbol: .lockShieldFill)
+                }
+            }
+            .font(.system(size: 22, weight: .bold))
+            .frame(minWidth: 280, minHeight: 52)
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(isSubmitting || !Self.isValidPIN(pin))
+        }
+    }
+
+    private func digitButton(_ digit: Int) -> some View {
+        Button {
+            guard !isSubmitting, pin.count < 6 else { return }
+            pin.append(String(digit))
+            errorMessage = nil
+        } label: {
+            Text("\(digit)")
+                .font(.system(size: 29, weight: .bold, design: .rounded))
+                .frame(width: 100, height: 56)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.gray.opacity(0.4))
+        .disabled(isSubmitting || pin.count >= 6)
+    }
+
+    private func submitPIN() {
+        guard !isSubmitting, Self.isValidPIN(pin) else { return }
+        let submittedPIN = pin
+        pin = ""
+        isSubmitting = true
+
+        acknowledge(submittedPIN) { message in
+            isSubmitting = false
+            errorMessage = message
+        }
     }
 }
 
