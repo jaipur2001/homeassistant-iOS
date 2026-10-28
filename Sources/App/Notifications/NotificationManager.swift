@@ -2210,7 +2210,7 @@ private final class KioskAlarmOverlayPresenter {
                     completion("Der Alarmdialog ist nicht mehr aktiv.")
                     return
                 }
-                self.acknowledge(pin: pin, server: server, on: webViewController, completion: completion)
+                acknowledge(pin: pin, server: server, on: webViewController, completion: completion)
             }
         )
         .embeddedInHostingController()
@@ -2258,7 +2258,7 @@ private final class KioskAlarmOverlayPresenter {
                         return
                     }
                     Current.Log.info("Kiosk alarm acknowledged after server-side PIN validation")
-                    self.hide(on: webViewController)
+                    hide(on: webViewController)
                     completion(nil)
                 }
             } catch {
