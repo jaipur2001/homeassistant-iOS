@@ -1,4 +1,4 @@
-trigger: kiosk80-alarm-pin-test
-source_commit: c851416fbc6ea9c27d125a3b9ddaf6eb94eef2b9
-candidate: 80
-note: build isolated test candidate; golden 79 unchanged
+trigger: kiosk81-pin-keypad-layout
+candidate: 81
+source_branch: feature/kiosk81-pin-keypad-layout
+note: new signed archive required for SwiftUI Grid patch; golden 79 and candidate 80 unchanged
