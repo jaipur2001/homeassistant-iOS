@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/kiosk80-alarm-pin
+      - feature/kiosk81-pin-keypad-layout
     paths:
       - "ha/kiosk_alarm/**"
       - "Sources/App/Notifications/NotificationManager.swift"
