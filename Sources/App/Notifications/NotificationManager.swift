@@ -2388,37 +2388,30 @@ struct KioskAlarmView: View {
                     .multilineTextAlignment(.center)
             }
 
-            ForEach(0 ..< 3, id: \.self) { row in
-                HStack(spacing: 14) {
-                    ForEach(1 ..< 4, id: \.self) { column in
-                        digitButton(row * 3 + column)
-                    }
+            Grid(horizontalSpacing: 14, verticalSpacing: 14) {
+                GridRow {
+                    digitButton(1)
+                    digitButton(2)
+                    digitButton(3)
                 }
-            }
 
-            HStack(spacing: 14) {
-                Button("Abbrechen") {
-                    pin = ""
-                    errorMessage = nil
-                    isEnteringPIN = false
+                GridRow {
+                    digitButton(4)
+                    digitButton(5)
+                    digitButton(6)
                 }
-                .disabled(isSubmitting)
-                .frame(width: 100, height: 56)
 
-                digitButton(0)
-
-                Button {
-                    if !pin.isEmpty {
-                        pin.removeLast()
-                        errorMessage = nil
-                    }
-                } label: {
-                    Image(systemSymbol: .deleteLeftFill)
-                        .font(.system(size: 28))
-                        .frame(width: 100, height: 56)
+                GridRow {
+                    digitButton(7)
+                    digitButton(8)
+                    digitButton(9)
                 }
-                .disabled(isSubmitting || pin.isEmpty)
-                .buttonStyle(.bordered)
+
+                GridRow {
+                    cancelButton
+                    digitButton(0)
+                    deleteButton
+                }
             }
             .foregroundStyle(.white)
 
@@ -2436,6 +2429,39 @@ struct KioskAlarmView: View {
             .tint(.red)
             .disabled(isSubmitting || !Self.isValidPIN(pin))
         }
+    }
+
+    private var cancelButton: some View {
+        Button {
+            pin = ""
+            errorMessage = nil
+            isEnteringPIN = false
+        } label: {
+            Text("Abbrechen")
+                .font(.system(size: 19, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 100, height: 56)
+        }
+        .buttonStyle(.bordered)
+        .tint(.gray.opacity(0.4))
+        .disabled(isSubmitting)
+    }
+
+    private var deleteButton: some View {
+        Button {
+            if !pin.isEmpty {
+                pin.removeLast()
+                errorMessage = nil
+            }
+        } label: {
+            Image(systemSymbol: .deleteLeftFill)
+                .font(.system(size: 28))
+                .frame(width: 100, height: 56)
+        }
+        .buttonStyle(.bordered)
+        .tint(.gray.opacity(0.4))
+        .disabled(isSubmitting || pin.isEmpty)
     }
 
     private func digitButton(_ digit: Int) -> some View {
