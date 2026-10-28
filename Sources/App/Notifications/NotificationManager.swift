@@ -2413,7 +2413,7 @@ struct KioskAlarmView: View {
                         errorMessage = nil
                     }
                 } label: {
-                    Image(systemSymbol: .deleteLeftFill)
+                    Image(systemName: "delete.left.fill")
                         .font(.system(size: 28))
                         .frame(width: 100, height: 56)
                 }
@@ -2427,7 +2427,7 @@ struct KioskAlarmView: View {
                     ProgressView()
                         .tint(.white)
                 } else {
-                    Label("PIN bestätigen", systemSymbol: .lockShieldFill)
+                    Label("PIN bestätigen", systemImage: "lock.shield.fill")
                 }
             }
             .font(.system(size: 22, weight: .bold))
