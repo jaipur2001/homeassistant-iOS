@@ -26,6 +26,22 @@ jobs:
           python-version: "3.13"
       - name: Install only lightweight test dependencies
         run: python -m pip install --disable-pip-version-check aiohttp voluptuous PyYAML
+      - name: SwiftFormat on changed Kiosk files
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" \
+            ghcr.io/nicklockwood/swiftformat:0.53.1 \
+            --lint --config .swiftformat \
+            Sources/App/Notifications/NotificationManager.swift \
+            Tests/App/Notifications/KioskAlarmPINTests.swift
+      - name: SwiftLint for changed Kiosk files
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" \
+            ghcr.io/realm/swiftlint:0.54.0 \
+            swiftlint lint --strict --config .swiftlint.yml \
+            Sources/App/Notifications/NotificationManager.swift \
+            Tests/App/Notifications/KioskAlarmPINTests.swift
       - name: Check Python syntax
         run: python -m compileall -q ha/kiosk_alarm
       - name: Test script guard and one-use authorization
