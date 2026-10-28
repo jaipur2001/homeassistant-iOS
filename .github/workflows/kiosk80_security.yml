@@ -1,0 +1,46 @@
+name: Kiosk #80 - HA PIN Security Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/kiosk80-alarm-pin
+    paths:
+      - "ha/kiosk_alarm/**"
+      - "Sources/App/Notifications/NotificationManager.swift"
+      - "Tests/App/Notifications/KioskAlarmPINTests.swift"
+      - ".github/workflows/kiosk80_security.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ha-security:
+    name: Validate YAML migration and PIN authorization
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+      - name: Install only lightweight test dependencies
+        run: python -m pip install --disable-pip-version-check aiohttp voluptuous PyYAML
+      - name: Check Python syntax
+        run: python -m compileall -q ha/kiosk_alarm
+      - name: Test script guard and one-use authorization
+        run: python -m unittest discover -s ha/kiosk_alarm/tests -p "test_*.py" -v
+      - name: Verify Swift includes no old direct acknowledgement
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("Sources/App/Notifications/NotificationManager.swift").read_text()
+          head = text.index("private final class KioskAlarmOverlayPresenter")
+          tail = text.index("extension NotificationManager: MessagingDelegate", head)
+          alarm = text[head:tail]
+          assert '"script",\n            service: "turn_on"' not in alarm
+          assert 'path: ["kiosk_alarm", "acknowledge"]' in alarm
+          assert 'private func submitPIN()' in alarm
+          assert 'Self.isValidPIN(pin)' in alarm
+          print("No direct alarm script call in kiosk overlay: OK")
+          PY
