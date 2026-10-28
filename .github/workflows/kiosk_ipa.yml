@@ -17,6 +17,7 @@ on:
       - fix/build69-frontend-recovery-v3
       - build/kiosk79-ci44-20261014
       - feature/kiosk80-alarm-pin
+      - feature/kiosk81-pin-keypad-layout
     paths:
       - ".github/kiosk-build-trigger"
 
