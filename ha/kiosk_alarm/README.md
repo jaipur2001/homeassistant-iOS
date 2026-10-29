@@ -1,7 +1,48 @@
-# Kiosk #80 – Alarmquittierung mit serverseitiger PIN
+# Kiosk Alarm PIN – Home Assistant Integration
 
-Status: Entwicklung, **nicht auf home01 installiert und nicht auf iPad getestet**.
-Golden State bleibt kiosk-golden-79; sämtliche Änderungen liegen im Branch feature/kiosk80-alarm-pin.
+**Referenzstand:** `kiosk-alarm-golden-v0.2.1` (Home Assistant), zugehöriger
+iPad-Kiosk-Golden-State `kiosk-golden-81` (signierter Build #81, 28.10.2026).
+
+Die PIN-geschützte Alarmquittierung und die Administrator-PIN-Verwaltung
+wurden vom Betreiber auf dem Produktivsystem erfolgreich getestet. Das
+petrolfarbene `mdi:shield-lock`-Icon ist im `brand/`-Ordner enthalten;
+die Anzeige auf dem Produktivsystem wurde nicht gesondert bestätigt.
+Der HA-Code und die iOS-App sind **separat versioniert**.
+
+## Updates ohne Änderung am Golden State #81
+
+Die HA-Integration liegt in diesem Repository unter
+`ha/kiosk_alarm/custom_components/kiosk_alarm/`. Nur **diesen Ordner**
+nach `/config/custom_components/kiosk_alarm/` übertragen. Das ist
+**kein separates GitHub-Repository**. iOS-Build #81 muss dafür nicht neu
+gebaut werden.
+
+Vor einer Aktualisierung ein Backup der HA-Konfiguration anlegen. Bestehende
+`configuration.yaml`, `secrets.yaml`, `scripts.yaml`,
+`automations.yaml` und `.storage/` **nicht** mit Beispieldateien
+überschreiben. HA nach dem Austausch der Integrationsdateien neu starten.
+
+## Sechsstellige PIN – serverseitig verbindlich
+
+Unter **Einstellungen → Geräte & Dienste → Kiosk Alarm PIN → Konfigurieren**
+können nur HA-Administratoren die PIN ändern. Beide Eingaben werden mit
+einem Passwort-Selektor verdeckt dargestellt. Die Integration akzeptiert
+**genau sechs ASCII-Ziffern (0–9)**, einschließlich führender Nullen.
+Zu kurze, zu lange, nichtnumerische oder voneinander abweichende Eingaben
+werden **vor dem Hashing und Speichern** abgewiesen.
+
+Hinweis: Der Standard-Home-Assistant-`TextSelector` bietet aktuell
+keine `maxlength`-Option. Mehr als sechs Zeichen lassen sich daher
+gegebenenfalls **eingeben**, aber **nicht speichern**. Diese serverseitige
+Prüfung ist die maßgebliche Sicherheitsgrenze. Die PIN wird nicht als
+Entity-Zustand angelegt. Der generierte PBKDF2-SHA256-Hash mit zufälligem
+Salt wird im HA-Config-Entry gespeichert, nicht die Klartext-PIN.
+
+Der Endpoint `POST /api/kiosk_alarm/acknowledge` akzeptiert ebenfalls
+ausschließlich sechs ASCII-Ziffern; drei falsche Versuche sperren die
+PIN-Prüfung fünf Minuten. Die Admin-Konfiguration nutzt die administrativen
+HA-Config-Flow-Endpunkte, **keinen** frei aufrufbaren Änderungsdienst.
+
 
 ## Sicherheitsarchitektur
 
@@ -78,9 +119,7 @@ Linux-Tests:
         python -m compileall -q ha/kiosk_alarm
         python -m unittest discover -s ha/kiosk_alarm/tests -p 'test_*.py' -v
 
-GitHub Actions Runs 40678604016 und 40678855334 erfolgreich.
-Das sind keine Xcode-, Swift-Lint-, Geräte- oder echten Home-Assistant-Integrationstests.
-**Vor Rollout sind iOS-Build und Produktiv-Konfigurations-Audit Pflicht.**
+Die GitHub-CI prüft Python-Syntax, PIN-Hash-Logik, die Authentifizierungs-Guards, YAML-Migration, Passwort-Felder, Service-Metadaten und die Brand-Dateien. Diese Unit-Tests ersetzen keine vollständigen Home-Assistant-Integrationstests; der Betreiber hat die produktive PIN-Verwaltung und den iPad-Build #81 praktisch bestätigt.
 
 ## Integrations-Icon (`mdi:shield-lock`)
 

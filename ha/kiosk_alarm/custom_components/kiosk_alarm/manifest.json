@@ -2,7 +2,7 @@
   "domain": "kiosk_alarm",
   "name": "Kiosk Alarm PIN",
   "version": "0.2.1",
-  "documentation": "https://github.com/jaipur2001/homeassistant-iOS",
+  "documentation": "https://github.com/jaipur2001/homeassistant-iOS/blob/kiosk-alarm-golden-v0.2.1/ha/kiosk_alarm/README.md",
   "dependencies": [
     "http"
   ],
